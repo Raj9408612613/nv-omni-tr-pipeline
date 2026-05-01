@@ -1,0 +1,57 @@
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
+
+# isaac-sim:5.1.0 drops to a non-root user; switch back for apt
+USER root
+
+# ── Install git (not included in Isaac Sim base image) ───────────────────────
+RUN apt-get update -qq && apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── IsaacLab inside the container ────────────────────────────────────────────
+RUN git clone https://github.com/isaac-sim/IsaacLab.git /opt/IsaacLab
+
+WORKDIR /opt/IsaacLab
+
+# Use the container's built-in Python (matches Isaac Sim's Python 3.10)
+# Step 1: setuptools + ray (pre-install to avoid resolution-too-deep)
+RUN /isaac-sim/python.sh -m pip install "setuptools<75.0.0" && \
+    /isaac-sim/python.sh -m pip install "ray[default]==2.45.0"
+
+# Step 2: rl_games — try available branches, fall back to main
+RUN /isaac-sim/python.sh -m pip install --use-deprecated=legacy-resolver \
+        "rl-games @ git+https://github.com/isaac-sim/rl_games.git@python3.11" || \
+    /isaac-sim/python.sh -m pip install --use-deprecated=legacy-resolver \
+        "rl-games @ git+https://github.com/isaac-sim/rl_games.git" || \
+    /isaac-sim/python.sh -m pip install rl-games
+
+# Step 3: IsaacLab core (--no-deps to skip dex-retargeting)
+RUN /isaac-sim/python.sh -m pip install --no-deps -e "source/isaaclab" && \
+    /isaac-sim/python.sh -m pip install toml "gymnasium==1.2.1" trimesh einops \
+        warp-lang "prettytable==3.3.0" flatdict cloudpickle farama-notifications
+
+# Step 4: IsaacLab extensions (each with fallback to --no-deps)
+RUN /isaac-sim/python.sh -m pip install --use-deprecated=legacy-resolver \
+        -e "source/isaaclab_assets" || \
+    /isaac-sim/python.sh -m pip install --no-deps -e "source/isaaclab_assets"
+
+RUN /isaac-sim/python.sh -m pip install --use-deprecated=legacy-resolver \
+        -e "source/isaaclab_tasks" || \
+    /isaac-sim/python.sh -m pip install --no-deps -e "source/isaaclab_tasks"
+
+RUN /isaac-sim/python.sh -m pip install --use-deprecated=legacy-resolver \
+        -e "source/isaaclab_rl" || \
+    /isaac-sim/python.sh -m pip install --no-deps -e "source/isaaclab_rl"
+
+# Step 5: Extra packages
+RUN /isaac-sim/python.sh -m pip install tensorboard "imageio[ffmpeg]"
+
+# Project repo will be mounted at /workspace
+WORKDIR /workspace
+ENV PYTHONPATH="/workspace"
+
+# Override base image ENTRYPOINT (/isaac-sim/runheadless.sh) which
+# launches Kit streaming and ignores the user command
+ENTRYPOINT []
+
+# Default: interactive bash
+CMD ["/bin/bash"]

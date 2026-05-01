@@ -1,0 +1,409 @@
+<mujoco model="spot_scene">
+  <!--
+    Spot Robot Scene — MJCF for MuJoCo MJX (GPU-batched physics)
+    ============================================================
+    Physics-accurate model derived from MuJoCo Menagerie (google-deepmind/mujoco_menagerie)
+    with real Boston Dynamics Spot mass, inertia, link lengths, joint limits, and actuator gains.
+    Mesh files from the official Menagerie URDF-derived model.
+    Joint names match the training env (fl_hx, fl_hy, fl_kn, fr_*, hl_*, hr_*).
+    25 mocap obstacle boxes + 5 dynamic mocap cylinders + 1 humanoid mocap body.
+    5 camera sites replicate config.py CAMERA_RIG positions.
+  -->
+
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+
+  <!-- Real Spot physics: implicitfast integrator, elliptic friction cone, stiff contacts -->
+  <option timestep="0.005" gravity="0 0 -9.81" integrator="implicitfast"
+          cone="elliptic" impratio="100"/>
+
+  <visual>
+    <global offwidth="1920" offheight="1080" ellipsoidinertia="true"/>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.2 0.2 0.2"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <default>
+    <!-- Spot robot defaults (from Menagerie reference) -->
+    <default class="spot">
+      <geom solref="0.004 1"/>
+      <joint actuatorfrcrange="-1000 1000" damping="1.0" armature="0.01" frictionloss="0.1"/>
+      <position kp="500" kv="40" inheritrange="1" ctrllimited="true"/>
+      <default class="visual">
+        <geom group="2" type="mesh" contype="0" conaffinity="0"/>
+      </default>
+      <default class="collision">
+        <geom group="3" type="mesh"/>
+        <default class="foot">
+          <geom type="sphere" size="0.036" pos="0 0 -0.3365" priority="1"
+                condim="6" solimp="0.015 1 0.036" friction="0.8 0.02 0.01"/>
+        </default>
+      </default>
+    </default>
+    <default class="obstacle">
+      <geom type="box" rgba="0.7 0.4 0.2 1" condim="3"/>
+    </default>
+    <default class="dynamic_obs">
+      <geom type="capsule" rgba="0.2 0.5 0.8 0.9" condim="3"/>
+    </default>
+  </default>
+
+  <!-- ================================================================ -->
+  <!-- ASSETS                                                            -->
+  <!-- ================================================================ -->
+  <asset>
+    <!-- Scene textures/materials -->
+    <texture name="floor_tex" type="2d" builtin="checker"
+             rgb1="0.45 0.55 0.65" rgb2="0.35 0.45 0.55" width="512" height="512"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="10 10" reflectance="0.25"
+              specular="0.4" shininess="0.5"/>
+    <texture name="wall_tex" type="2d" builtin="flat"
+             rgb1="0.85 0.85 0.82" width="128" height="128"/>
+    <material name="wall_mat" texture="wall_tex" reflectance="0.05"/>
+
+    <!-- Spot materials -->
+    <material name="BlackAbs" rgba="0.1 0.1 0.1 1"/>
+    <material name="wrap" rgba="0.878431 0.666666 0.227450 1"/>
+
+    <!-- Spot meshes (from MuJoCo Menagerie — real Spot geometry) -->
+    <mesh file="body_0.obj"/>
+    <mesh file="body_1.obj"/>
+    <mesh file="front_left_hip.obj"/>
+    <mesh file="front_left_upper_leg_0.obj"/>
+    <mesh file="front_left_upper_leg_1.obj"/>
+    <mesh file="front_left_lower_leg.obj"/>
+    <mesh file="front_right_hip.obj"/>
+    <mesh file="front_right_upper_leg_0.obj"/>
+    <mesh file="front_right_upper_leg_1.obj"/>
+    <mesh file="front_right_lower_leg.obj"/>
+    <mesh file="rear_left_hip.obj"/>
+    <mesh file="rear_left_upper_leg_0.obj"/>
+    <mesh file="rear_left_upper_leg_1.obj"/>
+    <mesh file="rear_left_lower_leg.obj"/>
+    <mesh file="rear_right_hip.obj"/>
+    <mesh file="rear_right_upper_leg_0.obj"/>
+    <mesh file="rear_right_upper_leg_1.obj"/>
+    <mesh file="rear_right_lower_leg.obj"/>
+    <mesh file="body_collision.obj"/>
+    <mesh file="left_upper_leg_collision.obj"/>
+    <mesh file="left_lower_leg_collision.obj"/>
+    <mesh file="right_upper_leg_collision.obj"/>
+    <mesh file="right_lower_leg_collision.obj"/>
+  </asset>
+
+  <!-- ================================================================ -->
+  <!-- WORLD BODY                                                         -->
+  <!-- ================================================================ -->
+  <worldbody>
+
+    <!-- Lighting -->
+    <light name="top_light" pos="0 0 6" dir="0 0 -1" diffuse="0.8 0.8 0.8"
+           specular="0.3 0.3 0.3" castshadow="true" cutoff="60"/>
+    <light name="front_fill" pos="4 -4 5" dir="-0.4 0.4 -0.7" diffuse="0.4 0.4 0.5"
+           specular="0.1 0.1 0.1" castshadow="false"/>
+    <light name="back_fill" pos="-3 3 4" dir="0.3 -0.3 -0.6" diffuse="0.25 0.25 0.3"
+           specular="0.05 0.05 0.05" castshadow="false"/>
+
+    <!-- Floor -->
+    <geom name="floor" type="plane" size="15 15 0.1"
+          material="floor_mat" rgba="0.45 0.55 0.65 1" condim="3"/>
+
+    <!-- Room walls (10x10 m room) — fixed -->
+    <geom name="wall_north" type="box" size="5 0.1 1.5"
+          pos="0 5 1.5" material="wall_mat" rgba="0.85 0.85 0.82 1"/>
+    <geom name="wall_south" type="box" size="5 0.1 1.5"
+          pos="0 -5 1.5" material="wall_mat" rgba="0.85 0.85 0.82 1"/>
+    <geom name="wall_east" type="box" size="0.1 5 1.5"
+          pos="5 0 1.5" material="wall_mat" rgba="0.85 0.85 0.82 1"/>
+    <geom name="wall_west" type="box" size="0.1 5 1.5"
+          pos="-5 0 1.5" material="wall_mat" rgba="0.85 0.85 0.82 1"/>
+
+    <!-- ============================================================ -->
+    <!-- STATIC OBSTACLE MOCAP BODIES (25 max from config)            -->
+    <!-- ============================================================ -->
+    <body name="obstacle_0"  mocap="true" pos="100 0 0.5"><geom class="obstacle" size="0.3 0.3 0.5"/></body>
+    <body name="obstacle_1"  mocap="true" pos="100 1 0.5"><geom class="obstacle" size="0.25 0.4 0.4"/></body>
+    <body name="obstacle_2"  mocap="true" pos="100 2 0.5"><geom class="obstacle" size="0.2 0.2 0.8"/></body>
+    <body name="obstacle_3"  mocap="true" pos="100 3 0.5"><geom class="obstacle" size="0.4 0.2 0.45"/></body>
+    <body name="obstacle_4"  mocap="true" pos="100 4 0.5"><geom class="obstacle" size="0.35 0.35 0.35"/></body>
+    <body name="obstacle_5"  mocap="true" pos="100 5 0.5"><geom class="obstacle" size="0.3 0.3 0.5"/></body>
+    <body name="obstacle_6"  mocap="true" pos="100 6 0.5"><geom class="obstacle" size="0.5 0.2 0.6"/></body>
+    <body name="obstacle_7"  mocap="true" pos="100 7 0.5"><geom class="obstacle" size="0.2 0.5 0.4"/></body>
+    <body name="obstacle_8"  mocap="true" pos="100 8 0.5"><geom class="obstacle" size="0.4 0.4 0.3"/></body>
+    <body name="obstacle_9"  mocap="true" pos="100 9 0.5"><geom class="obstacle" size="0.3 0.25 0.7"/></body>
+    <body name="obstacle_10" mocap="true" pos="100 10 0.5"><geom class="obstacle" size="0.2 0.3 0.5"/></body>
+    <body name="obstacle_11" mocap="true" pos="100 11 0.5"><geom class="obstacle" size="0.35 0.35 0.4"/></body>
+    <body name="obstacle_12" mocap="true" pos="100 12 0.5"><geom class="obstacle" size="0.45 0.2 0.45"/></body>
+    <body name="obstacle_13" mocap="true" pos="100 13 0.5"><geom class="obstacle" size="0.3 0.4 0.3"/></body>
+    <body name="obstacle_14" mocap="true" pos="100 14 0.5"><geom class="obstacle" size="0.25 0.25 0.6"/></body>
+    <body name="obstacle_15" mocap="true" pos="100 15 0.5"><geom class="obstacle" size="0.3 0.3 0.5"/></body>
+    <body name="obstacle_16" mocap="true" pos="100 16 0.5"><geom class="obstacle" size="0.4 0.3 0.35"/></body>
+    <body name="obstacle_17" mocap="true" pos="100 17 0.5"><geom class="obstacle" size="0.2 0.4 0.55"/></body>
+    <body name="obstacle_18" mocap="true" pos="100 18 0.5"><geom class="obstacle" size="0.35 0.2 0.4"/></body>
+    <body name="obstacle_19" mocap="true" pos="100 19 0.5"><geom class="obstacle" size="0.3 0.3 0.5"/></body>
+    <body name="obstacle_20" mocap="true" pos="100 20 0.5"><geom class="obstacle" size="0.4 0.4 0.4"/></body>
+    <body name="obstacle_21" mocap="true" pos="100 21 0.5"><geom class="obstacle" size="0.25 0.35 0.45"/></body>
+    <body name="obstacle_22" mocap="true" pos="100 22 0.5"><geom class="obstacle" size="0.3 0.25 0.5"/></body>
+    <body name="obstacle_23" mocap="true" pos="100 23 0.5"><geom class="obstacle" size="0.45 0.3 0.35"/></body>
+    <body name="obstacle_24" mocap="true" pos="100 24 0.5"><geom class="obstacle" size="0.2 0.2 0.7"/></body>
+
+    <!-- ============================================================ -->
+    <!-- DYNAMIC OBSTACLE MOCAP BODIES (5 max from config)            -->
+    <!-- ============================================================ -->
+    <body name="dynobs_0" mocap="true" pos="100 0 0.85"><geom class="dynamic_obs" size="0.25 0.85"/></body>
+    <body name="dynobs_1" mocap="true" pos="100 1 0.85"><geom class="dynamic_obs" size="0.25 0.85"/></body>
+    <body name="dynobs_2" mocap="true" pos="100 2 0.85"><geom class="dynamic_obs" size="0.25 0.85"/></body>
+    <body name="dynobs_3" mocap="true" pos="100 3 0.85"><geom class="dynamic_obs" size="0.25 0.85"/></body>
+    <body name="dynobs_4" mocap="true" pos="100 4 0.85"><geom class="dynamic_obs" size="0.25 0.85"/></body>
+
+    <!-- ============================================================ -->
+    <!-- HUMANOID OBSTACLE MOCAP BODY                                  -->
+    <!-- ============================================================ -->
+    <body name="human_0" mocap="true" pos="100 0 1.0">
+      <geom name="human_0_torso" type="capsule" size="0.12 0.25"
+            pos="0 0 0" rgba="0.8 0.6 0.5 1"/>
+      <geom name="human_0_head" type="sphere" size="0.12"
+            pos="0 0 0.42" rgba="0.8 0.6 0.5 1"/>
+      <geom name="human_0_lul" type="capsule" size="0.07 0.2"
+            pos="-0.1 0 -0.45" rgba="0.3 0.3 0.7 1"/>
+      <geom name="human_0_rul" type="capsule" size="0.07 0.2"
+            pos="0.1 0 -0.45" rgba="0.3 0.3 0.7 1"/>
+      <geom name="human_0_lll" type="capsule" size="0.06 0.2"
+            pos="-0.1 0 -0.85" rgba="0.3 0.3 0.7 1"/>
+      <geom name="human_0_rll" type="capsule" size="0.06 0.2"
+            pos="0.1 0 -0.85" rgba="0.3 0.3 0.7 1"/>
+    </body>
+
+    <!-- ============================================================ -->
+    <!-- SPOT ROBOT — Physics-accurate from MuJoCo Menagerie          -->
+    <!-- Real mass=32.86kg body, 1.68kg hips, 2.34kg upper legs,      -->
+    <!-- 0.35kg lower legs. Real link lengths & joint limits from SDK. -->
+    <!-- ============================================================ -->
+    <body name="base_link" childclass="spot" pos="0 0 0.46">
+      <light name="tracking" mode="trackcom" pos="0 0 2"/>
+      <freejoint name="root"/>
+
+      <!-- Real body inertial: 32.86 kg with proper CoM offset -->
+      <inertial pos="0.0063944 -9.81216e-05 0.000911379" mass="32.86"
+                diaginertia="0.13144 0.13144 0.13144"/>
+
+      <!-- Body visual meshes (real Spot geometry) -->
+      <geom mesh="body_0" material="BlackAbs" class="visual"/>
+      <geom mesh="body_1" material="wrap" class="visual"/>
+      <!-- Body collision mesh -->
+      <geom mesh="body_collision" class="collision"/>
+
+      <!-- ── CAMERA SITES (match config.py CAMERA_RIG exactly) ── -->
+      <site name="cam_front_center" pos="0.32 0.0 0.05"
+            euler="0 -0.1745 0" size="0.01"/>
+      <camera name="depth_front_center" pos="0.32 0.0 0.05"
+              euler="0 -0.1745 0" fovy="58" mode="fixed"/>
+      <site name="cam_front_left" pos="0.20 0.16 0.05"
+            euler="0 -0.1745 1.2217" size="0.01"/>
+      <camera name="depth_front_left" pos="0.20 0.16 0.05"
+              euler="0 -0.1745 1.2217" fovy="58" mode="fixed"/>
+      <site name="cam_front_right" pos="0.20 -0.16 0.05"
+            euler="0 -0.1745 -1.2217" size="0.01"/>
+      <camera name="depth_front_right" pos="0.20 -0.16 0.05"
+              euler="0 -0.1745 -1.2217" fovy="58" mode="fixed"/>
+      <site name="cam_rear_left" pos="-0.28 0.14 0.05"
+            euler="0 -0.1745 2.5307" size="0.01"/>
+      <camera name="depth_rear_left" pos="-0.28 0.14 0.05"
+              euler="0 -0.1745 2.5307" fovy="58" mode="fixed"/>
+      <site name="cam_rear_right" pos="-0.28 -0.14 0.05"
+            euler="0 -0.1745 -2.5307" size="0.01"/>
+      <camera name="depth_rear_right" pos="-0.28 -0.14 0.05"
+              euler="0 -0.1745 -2.5307" fovy="58" mode="fixed"/>
+
+      <!-- IMU site at body center -->
+      <site name="imu" pos="0 0 0" size="0.01"/>
+
+      <!-- ============================================================ -->
+      <!-- FRONT-LEFT LEG (real: hip offset 0.29785, uleg Y=0.1108,    -->
+      <!--   upper leg 0.32m, lower leg knee-X offset 0.025)           -->
+      <!-- ============================================================ -->
+      <body name="fl_hip" pos="0.29785 0.055 0">
+        <inertial pos="-0.00537435 0.0128418 9.87523e-05" quat="1 1 -1 1" mass="1.68"
+          diaginertia="0.00226544 0.00211474 0.00181296"/>
+        <joint name="fl_hx" axis="1 0 0" range="-0.785398 0.785398"/>
+        <geom material="BlackAbs" mesh="front_left_hip" class="visual"/>
+        <body name="fl_uleg" pos="0 0.1108 0">
+          <inertial pos="0.00514237 -0.00243237 -0.121009" mass="2.34"
+            diaginertia="0.0275596 0.0273549 0.00284815"/>
+          <joint name="fl_hy" axis="0 1 0" range="-0.898845 2.29511"/>
+          <geom mesh="front_left_upper_leg_0" material="wrap" class="visual"/>
+          <geom mesh="front_left_upper_leg_1" material="BlackAbs" class="visual"/>
+          <geom mesh="left_upper_leg_collision" class="collision"/>
+          <body name="fl_lleg" pos="0.025 0 -0.32">
+            <inertial pos="0.00225794 4.6076e-05 -0.180082" quat="1 0 0 1" mass="0.35"
+              diaginertia="0.00405032 0.00399902 0.00014934"/>
+            <joint name="fl_kn" axis="0 1 0" range="-2.7929 -0.254402"/>
+            <geom material="BlackAbs" mesh="front_left_lower_leg" class="visual"/>
+            <geom mesh="left_lower_leg_collision" class="collision"/>
+            <geom name="fl_foot" class="foot"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- ============================================================ -->
+      <!-- FRONT-RIGHT LEG                                               -->
+      <!-- ============================================================ -->
+      <body name="fr_hip" pos="0.29785 -0.055 0">
+        <inertial pos="-0.00537435 -0.0128418 -9.87523e-05" quat="1 1 -1 1" mass="1.68"
+          diaginertia="0.00226544 0.00211474 0.00181296"/>
+        <joint name="fr_hx" axis="1 0 0" range="-0.785398 0.785398"/>
+        <geom material="BlackAbs" mesh="front_right_hip" class="visual"/>
+        <body name="fr_uleg" pos="0 -0.1108 0">
+          <inertial pos="0.00514237 0.00243237 -0.121009" mass="2.34"
+            diaginertia="0.0275596 0.0273549 0.00284815"/>
+          <joint name="fr_hy" axis="0 1 0" range="-0.898845 2.24363"/>
+          <geom mesh="front_right_upper_leg_0" material="wrap" class="visual"/>
+          <geom mesh="front_right_upper_leg_1" material="BlackAbs" class="visual"/>
+          <geom mesh="right_upper_leg_collision" class="collision"/>
+          <body name="fr_lleg" pos="0.025 0 -0.32">
+            <inertial pos="0.00225794 4.6076e-05 -0.180082" quat="1 0 0 1" mass="0.35"
+              diaginertia="0.00405032 0.00399902 0.00014934"/>
+            <joint name="fr_kn" axis="0 1 0" range="-2.7929 -0.255648"/>
+            <geom material="BlackAbs" mesh="front_right_lower_leg" class="visual"/>
+            <geom mesh="right_lower_leg_collision" class="collision"/>
+            <geom name="fr_foot" class="foot"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- ============================================================ -->
+      <!-- HIND-LEFT LEG                                                 -->
+      <!-- ============================================================ -->
+      <body name="hl_hip" pos="-0.29785 0.055 0">
+        <inertial pos="0.00537435 0.0128418 -9.87523e-05" quat="1 1 -1 1" mass="1.68"
+          diaginertia="0.00226544 0.00211474 0.00181296"/>
+        <joint name="hl_hx" axis="1 0 0" range="-0.785398 0.785398"/>
+        <geom material="BlackAbs" mesh="rear_left_hip" class="visual"/>
+        <body name="hl_uleg" pos="0 0.1108 0">
+          <inertial pos="0.00514237 -0.00243237 -0.121009" mass="2.34"
+            diaginertia="0.0275596 0.0273549 0.00284815"/>
+          <joint name="hl_hy" axis="0 1 0" range="-0.898845 2.29511"/>
+          <geom mesh="rear_left_upper_leg_0" material="wrap" class="visual"/>
+          <geom mesh="rear_left_upper_leg_1" material="BlackAbs" class="visual"/>
+          <geom mesh="left_upper_leg_collision" class="collision"/>
+          <body name="hl_lleg" pos="0.025 0 -0.32">
+            <inertial pos="0.00225794 4.6076e-05 -0.180082" quat="1 0 0 1" mass="0.35"
+              diaginertia="0.00405032 0.00399902 0.00014934"/>
+            <joint name="hl_kn" axis="0 1 0" range="-2.7929 -0.247067"/>
+            <geom material="BlackAbs" mesh="rear_left_lower_leg" class="visual"/>
+            <geom mesh="left_lower_leg_collision" class="collision"/>
+            <geom name="hl_foot" class="foot"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- ============================================================ -->
+      <!-- HIND-RIGHT LEG                                                -->
+      <!-- ============================================================ -->
+      <body name="hr_hip" pos="-0.29785 -0.055 0">
+        <inertial pos="0.00537435 -0.0128418 9.87523e-05" quat="1 1 -1 1" mass="1.68"
+          diaginertia="0.00226544 0.00211474 0.00181296"/>
+        <joint name="hr_hx" axis="1 0 0" range="-0.785398 0.785398"/>
+        <geom material="BlackAbs" mesh="rear_right_hip" class="visual"/>
+        <body name="hr_uleg" pos="0 -0.1108 0">
+          <inertial pos="0.00514237 0.00243237 -0.121009" mass="2.34"
+            diaginertia="0.0275596 0.0273549 0.00284815"/>
+          <joint name="hr_hy" axis="0 1 0" range="-0.898845 2.29511"/>
+          <geom mesh="rear_right_upper_leg_0" material="wrap" class="visual"/>
+          <geom mesh="rear_right_upper_leg_1" material="BlackAbs" class="visual"/>
+          <geom mesh="right_upper_leg_collision" class="collision"/>
+          <body name="hr_lleg" pos="0.025 0 -0.32">
+            <inertial pos="0.00225794 4.6076e-05 -0.180082" quat="1 0 0 1" mass="0.35"
+              diaginertia="0.00405032 0.00399902 0.00014934"/>
+            <joint name="hr_kn" axis="0 1 0" range="-2.7929 -0.248282"/>
+            <geom material="BlackAbs" mesh="rear_left_lower_leg" class="visual"/>
+            <geom mesh="right_lower_leg_collision" class="collision"/>
+            <geom name="hr_foot" class="foot"/>
+          </body>
+        </body>
+      </body>
+
+    </body> <!-- end base_link -->
+
+  </worldbody>
+
+  <!-- ================================================================ -->
+  <!-- CONTACT EXCLUSIONS — prevent self-collision body<->upper legs    -->
+  <!-- ================================================================ -->
+  <contact>
+    <exclude body1="base_link" body2="fl_uleg"/>
+    <exclude body1="base_link" body2="fr_uleg"/>
+    <exclude body1="base_link" body2="hl_uleg"/>
+    <exclude body1="base_link" body2="hr_uleg"/>
+  </contact>
+
+  <!-- ================================================================ -->
+  <!-- ACTUATORS — position control, kp=500 kv=40 (real Spot SEA)      -->
+  <!-- Force limits ±1000N per joint via actuatorfrcrange in defaults   -->
+  <!-- ================================================================ -->
+  <actuator>
+    <position class="spot" name="act_fl_hx" joint="fl_hx"/>
+    <position class="spot" name="act_fl_hy" joint="fl_hy"/>
+    <position class="spot" name="act_fl_kn" joint="fl_kn"/>
+    <position class="spot" name="act_fr_hx" joint="fr_hx"/>
+    <position class="spot" name="act_fr_hy" joint="fr_hy"/>
+    <position class="spot" name="act_fr_kn" joint="fr_kn"/>
+    <position class="spot" name="act_hl_hx" joint="hl_hx"/>
+    <position class="spot" name="act_hl_hy" joint="hl_hy"/>
+    <position class="spot" name="act_hl_kn" joint="hl_kn"/>
+    <position class="spot" name="act_hr_hx" joint="hr_hx"/>
+    <position class="spot" name="act_hr_hy" joint="hr_hy"/>
+    <position class="spot" name="act_hr_kn" joint="hr_kn"/>
+  </actuator>
+
+  <!-- ================================================================ -->
+  <!-- SENSORS                                                           -->
+  <!-- ================================================================ -->
+  <sensor>
+    <jointpos name="jpos_fl_hx" joint="fl_hx"/>
+    <jointpos name="jpos_fl_hy" joint="fl_hy"/>
+    <jointpos name="jpos_fl_kn" joint="fl_kn"/>
+    <jointpos name="jpos_fr_hx" joint="fr_hx"/>
+    <jointpos name="jpos_fr_hy" joint="fr_hy"/>
+    <jointpos name="jpos_fr_kn" joint="fr_kn"/>
+    <jointpos name="jpos_hl_hx" joint="hl_hx"/>
+    <jointpos name="jpos_hl_hy" joint="hl_hy"/>
+    <jointpos name="jpos_hl_kn" joint="hl_kn"/>
+    <jointpos name="jpos_hr_hx" joint="hr_hx"/>
+    <jointpos name="jpos_hr_hy" joint="hr_hy"/>
+    <jointpos name="jpos_hr_kn" joint="hr_kn"/>
+    <jointvel name="jvel_fl_hx" joint="fl_hx"/>
+    <jointvel name="jvel_fl_hy" joint="fl_hy"/>
+    <jointvel name="jvel_fl_kn" joint="fl_kn"/>
+    <jointvel name="jvel_fr_hx" joint="fr_hx"/>
+    <jointvel name="jvel_fr_hy" joint="fr_hy"/>
+    <jointvel name="jvel_fr_kn" joint="fr_kn"/>
+    <jointvel name="jvel_hl_hx" joint="hl_hx"/>
+    <jointvel name="jvel_hl_hy" joint="hl_hy"/>
+    <jointvel name="jvel_hl_kn" joint="hl_kn"/>
+    <jointvel name="jvel_hr_hx" joint="hr_hx"/>
+    <jointvel name="jvel_hr_hy" joint="hr_hy"/>
+    <jointvel name="jvel_hr_kn" joint="hr_kn"/>
+    <framequat  name="imu_quat"   objtype="site" objname="imu"/>
+    <framelinvel name="imu_linvel" objtype="site" objname="imu"/>
+    <frameangvel name="imu_angvel" objtype="site" objname="imu"/>
+  </sensor>
+
+  <!-- ================================================================ -->
+  <!-- KEYFRAME — real standing pose from Spot SDK                      -->
+  <!-- ================================================================ -->
+  <keyframe>
+    <key name="home" qpos="
+    0 0 0.46
+    1 0 0 0
+    0 1.04 -1.8
+    0 1.04 -1.8
+    0 1.04 -1.8
+    0 1.04 -1.8"
+      ctrl="
+    0 1.04 -1.8
+    0 1.04 -1.8
+    0 1.04 -1.8
+    0 1.04 -1.8"/>
+  </keyframe>
+
+</mujoco>
