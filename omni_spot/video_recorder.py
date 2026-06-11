@@ -39,7 +39,7 @@ def record_episodes(
 
     Parameters
     ----------
-    env : SpotNavEnv
+    env : NavEnv
         Isaac Lab environment (must have a camera named `camera_name` in scene,
         OR falls back to env.render() if available).
     trainer : PPOTrainer
@@ -72,8 +72,8 @@ def record_episodes(
 
     with torch.no_grad():
         while episodes_done < n_episodes and step < n_episodes * max_steps:
-            # Get action from policy (deterministic: use mean)
-            action, _, _, _ = trainer.sample_action(obs)
+            # Get action from policy
+            action, _, _ = trainer.sample_action(obs)
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
