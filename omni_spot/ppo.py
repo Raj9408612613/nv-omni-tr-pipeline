@@ -351,7 +351,7 @@ class PPOTrainer:
         entropy = torch.mean(gaussian_entropy(log_std))
 
         total = (policy_loss + tc.vf_coef * value_loss
-                 - tc.ent_coef * entropy + 1.0 * bounds_loss)
+                 - tc.ent_coef * entropy + 10.0 * bounds_loss)
         total = torch.clamp(total, -1e6, 1e6)
         if not torch.isfinite(total):
             total = torch.tensor(0.0, device=total.device, requires_grad=True)
@@ -439,7 +439,7 @@ class PPOTrainer:
                 kl_sum += float(info["approx_kl"])
                 kl_n += 1
                 skipped_total += int(info.get("skipped_step", 0))
-                if kl_sum / max(1, kl_n) > 1.5 * tc.target_kl:
+                if kl_sum / max(1, kl_n) > tc.target_kl:
                     early_stop_epoch = epoch + 1
                     stop = True
                     break
