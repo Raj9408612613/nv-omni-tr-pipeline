@@ -463,9 +463,23 @@ if HAS_ISAAC:
                 step_count=self.episode_length_buf,
                 max_steps=self.max_episode_length,
             )
-            self._fallen = fallen
+            # Collision with an obstacle ends the episode. Without this,
+            # leaning on a box forever (paying collision_pen but collecting
+            # the alive bonus) is a stable attractor, and the unbounded
+            # -10/step tails dominate the return distribution.
+            if self._box_half.shape[0] > 0:
+                obs_d = torch.linalg.norm(
+                    self._obs_pos[:, :, :2]
+                    - robot.data.root_pos_w[:, None, :2], dim=-1
+                )
+                collided = (
+                    obs_d.min(dim=-1).values < x.obstacles.collision_dist
+                )
+            else:
+                collided = torch.zeros_like(fallen)
+            self._fallen = fallen | collided  # demotes via the curriculum
             self._at_goal = at_goal
-            terminated = fallen | at_goal
+            terminated = fallen | at_goal | collided
             truncated = timeout & ~terminated
             return terminated, truncated
 
