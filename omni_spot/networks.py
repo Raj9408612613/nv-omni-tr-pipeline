@@ -214,7 +214,10 @@ class Actor(nn.Module):
         """Returns (action_mean clamped, log_std clamped)."""
         p = self.proprio_mlp(proprio)
         x = self.trunk(torch.cat([p, e, z], dim=-1))
-        mean = torch.clamp(self.head(x), -self._mean_clip, self._mean_clip)
+        # tanh keeps the mean strictly inside (-1, 1) with restoring
+        # gradients; a hard clamp has zero gradient outside the range,
+        # so nothing opposed the mean drifting ever further out.
+        mean = torch.tanh(self.head(x))
         log_std = torch.clamp(self.log_std, self._log_std_min, self._log_std_max)
         return mean, log_std
 
