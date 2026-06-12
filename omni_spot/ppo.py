@@ -339,13 +339,19 @@ class PPOTrainer:
         pg_loss2 = torch.clamp(ratio, 1 - tc.clip_eps, 1 + tc.clip_eps) * adv
         policy_loss = -torch.mean(torch.minimum(pg_loss1, pg_loss2))
 
+        # Penalize the Gaussian mean drifting outside the [-1, 1] action
+        # range: sampled actions are clamped there, so an unbounded mean
+        # saturates actions and biases the clamped-sample log-probs.
+        bounds_loss = torch.mean((mean.abs() - 1.0).clamp(min=0.0) ** 2)
+
         # ── Value loss (simple MSE on normalized returns) ────────────
         value_loss = 0.5 * torch.mean((value - mb.ret) ** 2)
         value_loss = torch.clamp(value_loss, 0.0, 1_000_000.0)
 
         entropy = torch.mean(gaussian_entropy(log_std))
 
-        total = policy_loss + tc.vf_coef * value_loss - tc.ent_coef * entropy
+        total = (policy_loss + tc.vf_coef * value_loss
+                 - tc.ent_coef * entropy + 1.0 * bounds_loss)
         total = torch.clamp(total, -1e6, 1e6)
         if not torch.isfinite(total):
             total = torch.tensor(0.0, device=total.device, requires_grad=True)
@@ -378,6 +384,7 @@ class PPOTrainer:
 
         return {
             "policy_loss": policy_loss.item(),
+            "bounds_loss": bounds_loss.item(),
             "value_loss": value_loss.item(),
             "entropy": entropy.item(),
             "total_loss": total.item(),
