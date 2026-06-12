@@ -60,6 +60,11 @@ class DaggerTrainer:
               f"{sorted({m.split('.')[2] for m in missing})}")
 
         if sc.distill_extero_only:
+            # Freeze everything except the depth encoder so hold-steps
+            # (cached latent, no grad path) skip cleanly and no gradients
+            # accumulate on parameters the optimizer never touches.
+            self.student.actor.requires_grad_(False)
+            self.student.actor.extero_encoder.requires_grad_(True)
             params = list(self.student.actor.extero_encoder.parameters())
         else:
             params = [p for p in self.student.actor.parameters()

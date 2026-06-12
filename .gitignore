@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 AGENT_CONTEXT.md
+omni_logs/
+smoke_test_output/
