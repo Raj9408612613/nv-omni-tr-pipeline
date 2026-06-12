@@ -133,6 +133,7 @@ if HAS_ISAAC:
                 gpu_max_rigid_patch_count=2**23,
                 gpu_heap_capacity=2**26,
                 gpu_temp_buffer_capacity=2**24,
+                gpu_collision_stack_size=2**28,
                 gpu_max_num_partitions=8,
             ),
         )

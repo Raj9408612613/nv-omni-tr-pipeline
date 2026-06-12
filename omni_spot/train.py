@@ -49,11 +49,12 @@ class _Phase:
         self._thread.start()
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, exc_type, *_):
         self._stop.set()
         self._thread.join()
         elapsed = time.time() - self._start
-        print(f"  [DONE] {self._label} completed in {elapsed:.1f}s", flush=True)
+        word = "FAILED" if exc_type else "DONE"
+        print(f"  [{word}] {self._label} after {elapsed:.1f}s", flush=True)
 
 
 # ── Step 1: Launch Isaac Sim BEFORE importing Isaac Lab sub-modules ──
@@ -375,6 +376,10 @@ if __name__ == "__main__":
     code = 1
     try:
         code = main()
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        sys.stderr.flush()
     finally:
         simulation_app.close()
     sys.exit(code)
