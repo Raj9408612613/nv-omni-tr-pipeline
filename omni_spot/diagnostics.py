@@ -6,8 +6,6 @@ Ported from ppo_diagnostics.py. Framework-agnostic (uses plain floats/dicts).
 
 import numpy as np
 
-from .config import MAX_GRAD
-
 
 def compute_explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     """Explained variance: 1 - Var(y_true - y_pred) / Var(y_true)."""
@@ -17,7 +15,8 @@ def compute_explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     return float(1.0 - np.var(y_true - y_pred) / var_true)
 
 
-def print_diagnostics(update: int, rollout_diag: dict, update_diag: dict):
+def print_diagnostics(update: int, rollout_diag: dict, update_diag: dict,
+                      max_grad: float = 1.5):
     """Print a diagnostic block to stdout."""
     lines = []
     lines.append("")
@@ -71,10 +70,10 @@ def print_diagnostics(update: int, rollout_diag: dict, update_diag: dict):
     lines.append("")
     lines.append("  [GRADIENT HEALTH]")
     lines.append(f"    grad_global_norm: {ud.get('grad_norm', 0.0):>10.6f}  "
-                 f"(clipped to {MAX_GRAD})")
+                 f"(clipped to {max_grad})")
     if ud.get('skipped_steps', 0):
         lines.append(f"    skipped_steps   : {ud.get('skipped_steps', 0):>10d}  "
-                     f"(grad_norm > 10x MAX_GRAD)")
+                     f"(grad_norm > 10x max_grad)")
 
     # ── 6. Reward Components ─────────────────────────────────────────
     if 'reward_components' in rd:
@@ -89,9 +88,12 @@ def print_diagnostics(update: int, rollout_diag: dict, update_diag: dict):
     lines.append(f"    proprio        : mean={rd.get('proprio_mean', 0.0):>8.4f}  "
                  f"std={rd.get('proprio_std', 0.0):>8.4f}  "
                  f"nan_frac={rd.get('proprio_nan_frac', 0.0):>8.6f}")
-    lines.append(f"    cnn_feat       : mean={rd.get('cnn_feat_mean', 0.0):>8.4f}  "
-                 f"std={rd.get('cnn_feat_std', 0.0):>8.4f}  "
-                 f"nan_frac={rd.get('cnn_feat_nan_frac', 0.0):>8.6f}")
+    lines.append(f"    scandots       : mean={rd.get('scandot_mean', 0.0):>8.4f}  "
+                 f"std={rd.get('scandot_std', 0.0):>8.4f}  "
+                 f"nan_frac={rd.get('scandot_nan_frac', 0.0):>8.6f}")
+    if 'adapt_loss' in rd:
+        lines.append(f"    adapt_loss     : {rd['adapt_loss']:>8.4f}  "
+                     f"(phi regression ||z_hat - z||^2)")
 
     # ── 8. Flags / Warnings ──────────────────────────────────────────
     warnings = []

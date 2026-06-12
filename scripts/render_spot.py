@@ -65,7 +65,10 @@ def main():
         print("Run with: ~/.local/share/ov/pkg/isaac-sim-*/python.sh scripts/render_spot.py")
         sys.exit(1)
 
-    from omni_spot.config import STANDING_POSE, TARGET_HEIGHT
+    from omni_spot.configs import get_experiment_cfg
+    _cfg = get_experiment_cfg("spot")
+    STANDING_POSE = list(_cfg.robot.default_joint_pos)
+    TARGET_HEIGHT = _cfg.robot.init_height
 
     # ── Create world ──────────────────────────────────────────────
     print("[render] Creating Isaac Sim world...")

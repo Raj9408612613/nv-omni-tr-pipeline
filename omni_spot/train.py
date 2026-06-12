@@ -1,26 +1,27 @@
 """
-Omniverse Isaac Lab Training Entry Point — Spot Navigation
+Training Entry Point — teacher-student pipeline (Isaac Lab)
 ============================================================
-Ported from mjx_train.py. Uses PyTorch + Isaac Lab.
+Single entrypoint for both phases:
 
-IMPORTANT: Isaac Lab sub-modules (isaaclab.sim, isaaclab.envs, etc.)
-require the Omniverse simulation app to be running. We must launch it
-via AppLauncher BEFORE importing any Isaac Lab config/env classes.
+    # Phase 1: privileged PPO teacher (no rendering, scandots via raycast)
+    python -m omni_spot.train --phase teacher --robot spot --headless
 
-Usage (requires Isaac Lab / Omniverse):
-    /isaac-sim/python.sh -m omni_spot.train --num_envs 4096 --n_steps 2048 --total_updates 500
+    # Phase 2: DAgger depth distillation (cameras enabled automatically)
+    python -m omni_spot.train --phase student --robot spot \
+        --teacher_ckpt omni_logs/<run>/best.pt --headless
 
-For quick smoke test:
-    /isaac-sim/python.sh -m omni_spot.train --num_envs 64 --n_steps 128 --total_updates 5
+IMPORTANT: Isaac Lab sub-modules require the Omniverse app to be running.
+AppLauncher MUST run before importing isaaclab/env modules — keep the
+import order below.
 """
 
 import argparse
-import os
-import sys
-import time
 import csv
-import json
+import os
+import subprocess
+import sys
 import threading
+import time
 from datetime import datetime
 
 
@@ -35,104 +36,113 @@ def _heartbeat(stop_event: threading.Event, label: str, interval: int = 30):
 
 class _Phase:
     """Context manager that prints a heartbeat during a slow blocking call."""
+
     def __init__(self, label: str, interval: int = 30):
         self._label = label
-        self._stop  = threading.Event()
+        self._stop = threading.Event()
         self._thread = threading.Thread(
             target=_heartbeat, args=(self._stop, label, interval), daemon=True
         )
+
     def __enter__(self):
         self._start = time.time()
         self._thread.start()
         return self
+
     def __exit__(self, *_):
         self._stop.set()
         self._thread.join()
         elapsed = time.time() - self._start
         print(f"  [DONE] {self._label} completed in {elapsed:.1f}s", flush=True)
 
+
 # ── Step 1: Launch Isaac Sim BEFORE importing Isaac Lab sub-modules ──
-# This MUST happen before any 'from isaaclab.sim import ...' etc.
-print("[INIT] Launching Isaac Sim (first run takes ~5 min for shader compilation)...")
+print("[INIT] Launching Isaac Sim (first run takes ~5 min for shader "
+      "compilation)...", flush=True)
 try:
     from isaaclab.app import AppLauncher
 except ImportError:
     try:
         from omni.isaac.lab.app import AppLauncher
     except ImportError:
-        print("[ERROR] Cannot import AppLauncher from isaaclab or omni.isaac.lab")
+        print("[ERROR] Cannot import AppLauncher from isaaclab or "
+              "omni.isaac.lab")
         print("        Is Isaac Lab installed? pip list | grep isaaclab")
         sys.exit(1)
 
-_parser = argparse.ArgumentParser(description="Spot Navigation RL — Isaac Lab")
-# Environment
-_parser.add_argument("--num_envs",      type=int,   default=4096)
-_parser.add_argument("--n_steps",       type=int,   default=2048,
-                     help="Rollout steps per update")
-# Training
-_parser.add_argument("--total_updates", type=int,   default=500)
-_parser.add_argument("--lr",            type=float, default=3e-4)
-_parser.add_argument("--seed",          type=int,   default=42)
-# Logging
-_parser.add_argument("--log_interval",  type=int,   default=1)
-_parser.add_argument("--save_interval", type=int,   default=50)
-_parser.add_argument("--log_dir",       type=str,   default="omni_logs")
-# Resume
-_parser.add_argument("--resume",        type=str,   default=None,
-                     help="Path to checkpoint to resume from")
-# Profiling
-_parser.add_argument("--profile",       type=int,   default=0, metavar="N",
-                     help="Profile first N updates with per-component timing")
-# AppLauncher adds --headless, --device, --enable_cameras, etc.
+_parser = argparse.ArgumentParser(
+    description="Teacher-student navigation RL — Isaac Lab"
+)
+_parser.add_argument("--phase", choices=["teacher", "student"],
+                     default="teacher")
+_parser.add_argument("--robot", type=str, default="spot",
+                     help="Config module name in omni_spot/configs/")
+# Common overrides (None -> use the value from the robot config)
+_parser.add_argument("--num_envs", type=int, default=None)
+_parser.add_argument("--lr", type=float, default=None)
+_parser.add_argument("--seed", type=int, default=42)
+_parser.add_argument("--log_interval", type=int, default=None)
+_parser.add_argument("--save_interval", type=int, default=None)
+_parser.add_argument("--log_dir", type=str, default="omni_logs")
+_parser.add_argument("--resume", type=str, default=None)
+# Teacher-specific
+_parser.add_argument("--n_steps", type=int, default=None)
+_parser.add_argument("--total_updates", type=int, default=None)
+_parser.add_argument("--profile", type=int, default=0, metavar="N",
+                     help="Profile first N updates")
+# Student-specific
+_parser.add_argument("--total_iters", type=int, default=None)
+_parser.add_argument("--teacher_ckpt", type=str, default=None,
+                     help="Phase 1 checkpoint (required for --phase student)")
 AppLauncher.add_app_launcher_args(_parser)
 args = _parser.parse_args()
 
-# Launch the simulation app (starts Kit, loads extensions, compiles shaders)
+if args.phase == "student":
+    if not args.teacher_ckpt:
+        _parser.error("--teacher_ckpt is required for --phase student")
+    # Cameras exist only in Phase 2; never enabled for the teacher.
+    args.enable_cameras = True
+
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
-print("[INIT] Isaac Sim launched successfully.")
+print("[INIT] Isaac Sim launched successfully.", flush=True)
 
 # ── Step 2: NOW safe to import Isaac Lab sub-modules & PyTorch ───────
-import torch
+import torch  # noqa: E402
 
-from .config import LR
-from .ppo import PPOTrainer
-from .diagnostics import print_diagnostics
-
+from .configs import get_experiment_cfg  # noqa: E402
+from .diagnostics import print_diagnostics  # noqa: E402
 
 REWARD_COMPONENT_KEYS = (
     "r_progress", "r_goal", "r_collision", "r_near",
     "r_upright", "r_height", "r_energy", "r_smooth",
-    "r_alive", "r_heading", "dist_goal",
+    "r_alive", "r_heading", "r_vel_track", "dist_goal", "terrain_level",
 )
 
-CSV_FIELDS = (
-    # Identity / timing
+TEACHER_CSV_FIELDS = (
     "update", "timesteps", "wall_time", "rollout_sec", "update_sec", "sps",
-    # Rollout reward stats
-    "rew_mean", "rew_min", "rew_max", "done_rate", "ep_count",
-    # Returns & advantages
+    "rew_mean", "rew_min", "rew_max", "done_rate", "ep_count", "adapt_loss",
     "ret_raw_mean", "ret_raw_std", "ret_raw_min", "ret_raw_max",
     "ret_norm_mean", "ret_norm_std", "ret_norm_min", "ret_norm_max",
     "ret_scale_mean", "ret_scale_std",
     "adv_mean", "adv_std", "adv_min", "adv_max",
-    # Value predictions
     "val_raw_mean", "val_raw_std", "val_raw_min", "val_raw_max",
     "explained_var",
-    # Policy health
     "action_mean_abs", "action_std_mean", "entropy",
     "approx_kl", "clip_frac", "ratio_mean", "ratio_max",
-    # Loss components
     "policy_loss", "value_loss", "total_loss",
-    # Gradient health
     "grad_norm", "skipped_steps",
-    # PPO update loop
     "epochs_run", "early_stop_epoch", "running_kl", "lr",
-    # Observation health
     "proprio_mean", "proprio_std", "proprio_nan_frac",
-    "cnn_feat_mean", "cnn_feat_std", "cnn_feat_nan_frac",
-    # Reward components (per-step mean)
+    "scandot_mean", "scandot_std", "scandot_nan_frac",
     *REWARD_COMPONENT_KEYS,
+)
+
+STUDENT_CSV_FIELDS = (
+    "iter", "timesteps", "wall_time", "sps",
+    "dagger_loss", "dagger_loss_ema",
+    "depth_new_frame_rate", "action_gap_p50", "action_gap_p95",
+    "done_rate", "grad_norm", "lr", "vram_alloc_gb",
 )
 
 
@@ -144,278 +154,227 @@ def _fmt(x, spec=".6g"):
 
 
 class SimpleLogger:
-    """Progressive CSV + TensorBoard logger.
+    """Progressive CSV + TensorBoard logger. Every row is flushed
+    immediately so a crash mid-run still leaves usable logs."""
 
-    Every update appends a fully-flattened row (all diagnostic fields) and
-    flushes to disk immediately so crash-mid-run still leaves usable logs.
-    """
-
-    def __init__(self, log_dir: str, run_id: str):
+    def __init__(self, log_dir: str, run_id: str, fields: tuple):
         self.log_dir = os.path.join(log_dir, run_id)
         os.makedirs(self.log_dir, exist_ok=True)
         self.csv_path = os.path.join(self.log_dir, "train_log.csv")
         self.csv_file = open(self.csv_path, "w", newline="")
+        self.fields = fields
         self.csv_writer = csv.DictWriter(
-            self.csv_file, fieldnames=list(CSV_FIELDS), extrasaction="ignore"
+            self.csv_file, fieldnames=list(fields), extrasaction="ignore"
         )
         self.csv_writer.writeheader()
         self.csv_file.flush()
-        print(f"[LOG] CSV logging to {self.csv_path}")
-
-        self.tb_writer = None
+        self.tb = None
         try:
             from torch.utils.tensorboard import SummaryWriter
-            tb_path = os.path.join(self.log_dir, "tb")
-            self.tb_writer = SummaryWriter(tb_path)
-            print(f"[LOG] TensorBoard logging to {tb_path}")
-        except ImportError:
-            print("[LOG] TensorBoard not available, using CSV only")
+            self.tb = SummaryWriter(os.path.join(self.log_dir, "tb"))
+        except Exception as e:  # noqa: BLE001 — TB is optional
+            print(f"[logger] TensorBoard unavailable ({e}); CSV only")
 
-    def log(self, update, timesteps, wall_time, rollout_stats, update_info,
-            rollout_sec, update_sec):
-        diag = rollout_stats.get("_diag", {}) or {}
-        rew_components = diag.get("reward_components", {}) or {}
-        sps = (timesteps / wall_time) if wall_time > 0 else 0.0
-
-        row = {
-            "update":           update,
-            "timesteps":        timesteps,
-            "wall_time":        _fmt(wall_time, ".3f"),
-            "rollout_sec":      _fmt(rollout_sec, ".3f"),
-            "update_sec":       _fmt(update_sec, ".3f"),
-            "sps":              _fmt(sps, ".1f"),
-            "rew_mean":         _fmt(rollout_stats.get("rew_mean")),
-            "rew_min":          _fmt(rollout_stats.get("rew_min")),
-            "rew_max":          _fmt(rollout_stats.get("rew_max")),
-            "done_rate":        _fmt(rollout_stats.get("done_rate")),
-            "ep_count":         rollout_stats.get("ep_count", 0),
-            "ret_raw_mean":     _fmt(diag.get("ret_raw_mean")),
-            "ret_raw_std":      _fmt(diag.get("ret_raw_std")),
-            "ret_raw_min":      _fmt(diag.get("ret_raw_min")),
-            "ret_raw_max":      _fmt(diag.get("ret_raw_max")),
-            "ret_norm_mean":    _fmt(diag.get("ret_norm_mean")),
-            "ret_norm_std":     _fmt(diag.get("ret_norm_std")),
-            "ret_norm_min":     _fmt(diag.get("ret_norm_min")),
-            "ret_norm_max":     _fmt(diag.get("ret_norm_max")),
-            "ret_scale_mean":   _fmt(diag.get("ret_scale_mean")),
-            "ret_scale_std":    _fmt(diag.get("ret_scale_std")),
-            "adv_mean":         _fmt(diag.get("adv_mean")),
-            "adv_std":          _fmt(diag.get("adv_std")),
-            "adv_min":          _fmt(diag.get("adv_min")),
-            "adv_max":          _fmt(diag.get("adv_max")),
-            "val_raw_mean":     _fmt(diag.get("val_raw_mean")),
-            "val_raw_std":      _fmt(diag.get("val_raw_std")),
-            "val_raw_min":      _fmt(diag.get("val_raw_min")),
-            "val_raw_max":      _fmt(diag.get("val_raw_max")),
-            "explained_var":    _fmt(diag.get("explained_var")),
-            "action_mean_abs":  _fmt(update_info.get("action_mean_abs")),
-            "action_std_mean":  _fmt(update_info.get("action_std_mean")),
-            "entropy":          _fmt(update_info.get("entropy")),
-            "approx_kl":        _fmt(update_info.get("approx_kl")),
-            "clip_frac":        _fmt(update_info.get("clip_frac")),
-            "ratio_mean":       _fmt(update_info.get("ratio_mean")),
-            "ratio_max":        _fmt(update_info.get("ratio_max")),
-            "policy_loss":      _fmt(update_info.get("policy_loss")),
-            "value_loss":       _fmt(update_info.get("value_loss")),
-            "total_loss":       _fmt(update_info.get("total_loss")),
-            "grad_norm":        _fmt(update_info.get("grad_norm")),
-            "skipped_steps":    update_info.get("skipped_steps", 0),
-            "epochs_run":       update_info.get("epochs_run", ""),
-            "early_stop_epoch": update_info.get("early_stop_epoch", ""),
-            "running_kl":       _fmt(update_info.get("running_kl")),
-            "lr":               _fmt(update_info.get("lr"), ".3e"),
-            "proprio_mean":     _fmt(diag.get("proprio_mean")),
-            "proprio_std":      _fmt(diag.get("proprio_std")),
-            "proprio_nan_frac": _fmt(diag.get("proprio_nan_frac")),
-            "cnn_feat_mean":    _fmt(diag.get("cnn_feat_mean")),
-            "cnn_feat_std":     _fmt(diag.get("cnn_feat_std")),
-            "cnn_feat_nan_frac": _fmt(diag.get("cnn_feat_nan_frac")),
-        }
-        for k in REWARD_COMPONENT_KEYS:
-            row[k] = _fmt(rew_components.get(k))
-
-        self.csv_writer.writerow(row)
+    def log(self, step: int, row: dict):
+        self.csv_writer.writerow(
+            {k: (v if isinstance(v, str) else _fmt(v))
+             for k, v in row.items() if k in self.fields}
+        )
         self.csv_file.flush()
-        try:
-            os.fsync(self.csv_file.fileno())
-        except (OSError, AttributeError):
-            pass
-
-        if self.tb_writer:
-            tb = self.tb_writer
-            tb.add_scalar("reward/mean", rollout_stats["rew_mean"], timesteps)
-            tb.add_scalar("reward/min",  rollout_stats["rew_min"],  timesteps)
-            tb.add_scalar("reward/max",  rollout_stats["rew_max"],  timesteps)
-            tb.add_scalar("episode/done_rate", rollout_stats["done_rate"], timesteps)
-            tb.add_scalar("episode/ep_count",  rollout_stats["ep_count"],  timesteps)
-            for k in ("policy_loss", "value_loss", "total_loss", "entropy",
-                      "approx_kl", "clip_frac", "ratio_mean", "ratio_max",
-                      "grad_norm", "action_std_mean", "action_mean_abs"):
-                if k in update_info:
-                    tb.add_scalar(f"ppo/{k}", update_info[k], timesteps)
-            for k in ("explained_var", "ret_raw_mean", "ret_raw_std",
-                      "val_raw_mean", "val_raw_std",
-                      "adv_mean", "adv_std",
-                      "proprio_nan_frac", "cnn_feat_nan_frac"):
-                if k in diag:
-                    tb.add_scalar(f"diag/{k}", diag[k], timesteps)
-            for k, v in rew_components.items():
-                tb.add_scalar(f"reward_components/{k}", v, timesteps)
-            tb.add_scalar("timing/rollout_sec", rollout_sec, timesteps)
-            tb.add_scalar("timing/update_sec",  update_sec, timesteps)
-            tb.add_scalar("timing/sps", sps, timesteps)
+        if self.tb is not None:
+            for k, v in row.items():
+                try:
+                    self.tb.add_scalar(k, float(v), step)
+                except (TypeError, ValueError):
+                    pass
 
     def close(self):
         self.csv_file.close()
-        if self.tb_writer:
-            self.tb_writer.close()
+        if self.tb is not None:
+            self.tb.close()
 
 
-def report_gpu_memory(label=""):
-    """Print actual GPU memory usage."""
+def report_gpu_memory(tag: str):
+    """Print torch allocator stats AND total device usage (nvidia-smi —
+    captures PhysX/RTX memory that the torch allocator can't see)."""
     if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1e9
-        reserved  = torch.cuda.memory_reserved() / 1e9
-        max_alloc = torch.cuda.max_memory_allocated() / 1e9
-        print(f"  [GPU {label}] {allocated:.2f} GB allocated, "
-              f"{reserved:.2f} GB reserved, {max_alloc:.2f} GB peak")
+        dev = torch.cuda.current_device()
+        total = torch.cuda.get_device_properties(dev).total_memory / 2**30
+        print(
+            f"[VRAM][{tag}] torch: allocated="
+            f"{torch.cuda.memory_allocated(dev) / 2**30:.2f} GiB  "
+            f"max_allocated="
+            f"{torch.cuda.max_memory_allocated(dev) / 2**30:.2f} GiB  "
+            f"reserved={torch.cuda.memory_reserved(dev) / 2**30:.2f} GiB  "
+            f"device_total={total:.1f} GiB",
+            flush=True,
+        )
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+             "--format=csv,noheader"],
+            text=True, timeout=10,
+        ).strip()
+        print(f"[VRAM][{tag}] nvidia-smi: {out}", flush=True)
+    except Exception:  # noqa: BLE001 — informational only
+        pass
 
 
-def main():
-    # args already parsed at module level (before AppLauncher)
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+def _apply_overrides(cfg, a):
+    """CLI values override the robot-config training fields when provided."""
+    t, s = cfg.teacher, cfg.student
+    if a.num_envs is not None:
+        t.num_envs = a.num_envs
+        s.num_envs = a.num_envs
+    if a.lr is not None:
+        t.lr = a.lr
+        s.lr = a.lr
+    if a.n_steps is not None:
+        t.n_steps = a.n_steps
+    if a.total_updates is not None:
+        t.total_updates = a.total_updates
+    if a.total_iters is not None:
+        s.total_iters = a.total_iters
+    if a.log_interval is not None:
+        t.log_interval = a.log_interval
+        s.log_interval = a.log_interval
+    if a.save_interval is not None:
+        t.save_interval = a.save_interval
+        s.save_interval = a.save_interval
 
-    print(f"{'='*60}")
-    print(f"  Spot Navigation RL — Isaac Lab (PyTorch)")
-    print(f"  Envs: {args.num_envs}  Steps: {args.n_steps}  "
-          f"Updates: {args.total_updates}  LR: {args.lr}")
-    print(f"{'='*60}")
 
-    # ── Logger ──────────────────────────────────────────────────────
-    logger = SimpleLogger(args.log_dir, run_id)
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 1 — privileged PPO teacher
+# ════════════════════════════════════════════════════════════════════════════
 
-    # ── Environment (Isaac Lab) ─────────────────────────────────────
-    # Simulation app is already running (launched at module level).
-    # Now Isaac Lab sub-module imports will work.
-    print("[INIT] Creating Isaac Lab environment...")
-    t0 = time.time()
+def run_teacher(cfg, a) -> int:
+    from .env_cfg import build_env_cfg
+    from .nav_env import NavEnv
+    from .ppo import PPOTrainer
 
-    from .spot_env_cfg import SpotNavEnvCfg, HAS_ISAAC, _ISAAC_IMPORT_ERROR
-    from .spot_env import SpotNavEnv
-    from .physics_tuning import apply_tuning
+    tc = cfg.teacher
+    env_cfg = build_env_cfg(cfg, tc.num_envs)
+    env_cfg.seed = a.seed
 
-    if not HAS_ISAAC:
-        print(f"[ERROR] Isaac Lab import failed: {_ISAAC_IMPORT_ERROR}")
-        sys.exit(1)
+    with _Phase("Environment creation"):
+        env = NavEnv(env_cfg, cfg)
+    device = str(env.device)
+    print(f"[INIT] {tc.num_envs} envs on {device}; scandots "
+          f"{cfg.scandots.grid_x}x{cfg.scandots.grid_y}; cameras: OFF",
+          flush=True)
 
-    env_cfg = SpotNavEnvCfg()
-    env_cfg.scene.num_envs = args.num_envs
-    apply_tuning(env_cfg.sim, env_cfg.scene)
+    trainer = PPOTrainer(cfg, device=device)
+    if a.resume:
+        trainer.load(a.resume)
+        print(f"[INIT] Resumed from {a.resume}")
 
-    print("[INIT] Building scene + RTX cameras (may take 10-30 min)...", flush=True)
-    with _Phase("RTX camera init / scene build"):
-        env = SpotNavEnv(cfg=env_cfg)
+    run_id = datetime.now().strftime("teacher_%Y%m%d_%H%M%S")
+    logger = SimpleLogger(a.log_dir, run_id, TEACHER_CSV_FIELDS)
+    print(f"[INIT] Logging to {logger.log_dir}")
 
-    print(f"[INIT] Environment created in {time.time()-t0:.1f}s")
-    report_gpu_memory("after env creation")
-
-    # ── Trainer ─────────────────────────────────────────────────────
-    print("[INIT] Creating PPO trainer...")
-    trainer = PPOTrainer(
-        n_envs        = args.num_envs,
-        n_steps       = args.n_steps,
-        lr            = args.lr,
-        total_updates = args.total_updates,
-    )
-
-    if args.resume:
-        print(f"[INIT] Resuming from {args.resume}")
-        trainer.load(args.resume)
-
-    # ── Initial reset ───────────────────────────────────────────────
-    print("[INIT] Resetting environments...", flush=True)
-    with _Phase("env.reset()"):
+    with _Phase("First reset"):
         obs, _ = env.reset()
     report_gpu_memory("after reset")
-    print("[INIT] Reset complete. Starting training.\n")
 
-    # ── Training loop ───────────────────────────────────────────────
-    total_timesteps = 0
-    train_start = time.time()
-    best_reward = float("-inf")
+    best_rew = float("-inf")
+    t_start = time.time()
+    timesteps = 0
 
-    for update in range(1, args.total_updates + 1):
-        do_profile = args.profile > 0 and update <= args.profile
-
-        # Anneal LR linearly toward 0 over the run BEFORE this update.
+    for update in range(1, tc.total_updates + 1):
         trainer.anneal_lr(update)
 
-        # Collect rollout
-        t_roll = time.time()
-        obs, batch, rollout_stats = trainer.collect_rollout(
-            env, obs, profile=do_profile,
+        t0 = time.time()
+        obs, batch, stats = trainer.collect_rollout(
+            env, obs, profile=(update <= a.profile)
         )
-        rollout_sec = time.time() - t_roll
+        rollout_sec = time.time() - t0
 
-        # PPO update
-        t_upd = time.time()
-        update_info = trainer.update(batch)
-        update_sec = time.time() - t_upd
+        t0 = time.time()
+        info = trainer.update(batch)
+        update_sec = time.time() - t0
 
-        # Profiling
-        if do_profile:
-            timing = rollout_stats.get("_timing", {})
-            if timing:
-                print(f"  [PROFILE update {update}] "
-                      f"inference={timing.get('inference_sec', 0):.2f}s  "
-                      f"env_step={timing.get('env_step_sec', 0):.2f}s")
-            report_gpu_memory(f"after update {update}")
+        timesteps += tc.num_envs * tc.n_steps
+        sps = tc.num_envs * tc.n_steps / max(1e-6, rollout_sec + update_sec)
 
-        total_timesteps += args.num_envs * args.n_steps
-        wall_time = time.time() - train_start
+        row = {
+            "update": update, "timesteps": timesteps,
+            "wall_time": time.time() - t_start,
+            "rollout_sec": rollout_sec, "update_sec": update_sec, "sps": sps,
+            **{k: v for k, v in stats.items() if not k.startswith("_")},
+            **stats.get("_diag", {}),
+            **info,
+        }
+        row.update(stats.get("_diag", {}).get("reward_components", {}))
+        logger.log(update, row)
 
-        # Log
-        if update % args.log_interval == 0:
-            mean_rew = rollout_stats["rew_mean"]
-            sps = (args.num_envs * args.n_steps) / (rollout_sec + update_sec)
-            print(f"[{update:>4d}/{args.total_updates}]  "
-                  f"rew={mean_rew:>8.2f}  "
-                  f"eps={rollout_stats['ep_count']:>5d}  "
-                  f"roll={rollout_sec:.1f}s  upd={update_sec:.1f}s  "
-                  f"SPS={sps:,.0f}  total={total_timesteps:,}")
+        if update % tc.log_interval == 0:
+            print(
+                f"[{update:4d}/{tc.total_updates}] "
+                f"rew={stats['rew_mean']:8.3f}  "
+                f"done={stats['done_rate']:.3f}  "
+                f"adapt={stats['adapt_loss']:.4f}  "
+                f"kl={info.get('running_kl', 0):.4f}  "
+                f"lr={info.get('lr', 0):.2e}  sps={sps:,.0f}",
+                flush=True,
+            )
+            if "_timing" in stats:
+                print(f"    profile: {stats['_timing']}")
+        if update == 1 or update % 25 == 0:
+            print_diagnostics(update, stats.get("_diag", {}), info,
+                              max_grad=tc.max_grad)
+        if update == 1:
+            report_gpu_memory("after update 1")
 
-            logger.log(update, total_timesteps, wall_time,
-                       rollout_stats, update_info, rollout_sec, update_sec)
-
-            # Diagnostics
-            diag = rollout_stats.get("_diag", {})
-            if diag:
-                print_diagnostics(update, diag, update_info)
-
-        # Save
-        if update % args.save_interval == 0:
+        if update % tc.save_interval == 0:
             path = os.path.join(logger.log_dir, f"ckpt_{update:05d}.pt")
             trainer.save(path)
             print(f"  [SAVE] {path}")
-
-        if rollout_stats["rew_mean"] > best_reward:
-            best_reward = rollout_stats["rew_mean"]
+        if stats["rew_mean"] > best_rew:
+            best_rew = stats["rew_mean"]
             trainer.save(os.path.join(logger.log_dir, "best.pt"))
 
-    # Final save
     trainer.save(os.path.join(logger.log_dir, "final.pt"))
+    report_gpu_memory("end of training")
+
+    # Success marker (smoke scripts check this to avoid false positives from
+    # Isaac Sim's shutdown masking the Python exit code)
+    with open(os.path.join(a.log_dir, "SUCCESS"), "w") as f:
+        f.write(f"phase=teacher robot={cfg.robot.name} "
+                f"total_timesteps={timesteps} run={run_id}\n")
+    print(f"[DONE] Teacher training complete: {timesteps:,} timesteps. "
+          f"Best reward {best_rew:.3f}. Checkpoints in {logger.log_dir}")
     logger.close()
-    print(f"\n[DONE] Training complete. {total_timesteps:,} total timesteps.")
+    env.close()
+    return 0
 
-    # Write success marker (smoke_test.sh checks this to avoid false positives
-    # from Isaac Sim's shutdown masking the Python exit code)
-    marker = os.path.join(args.log_dir, "SUCCESS")
-    with open(marker, "w") as f:
-        f.write(f"{total_timesteps}\n")
 
-    # Shut down Isaac Sim
-    simulation_app.close()
+# ════════════════════════════════════════════════════════════════════════════
+# Entry
+# ════════════════════════════════════════════════════════════════════════════
+
+def main() -> int:
+    torch.manual_seed(args.seed)
+    cfg = get_experiment_cfg(args.robot)
+    _apply_overrides(cfg, args)
+
+    if args.phase == "teacher":
+        return run_teacher(cfg, args)
+
+    cfg.camera.enabled = True  # Phase 2: construct the camera rig
+    from .dagger import run_student
+    return run_student(
+        cfg, args,
+        logger_cls=SimpleLogger,
+        csv_fields=STUDENT_CSV_FIELDS,
+        report_gpu_memory=report_gpu_memory,
+        phase_ctx=_Phase,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    code = 1
+    try:
+        code = main()
+    finally:
+        simulation_app.close()
+    sys.exit(code)
