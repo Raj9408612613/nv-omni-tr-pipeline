@@ -265,12 +265,12 @@ if HAS_ISAAC:
             debug_vis=False,
         )
         try:
-            return RayCasterCfg(**kwargs, attach_yaw_only=sc.attach_yaw_only)
-        except TypeError:  # newer versions renamed the option
             return RayCasterCfg(
                 **kwargs,
                 ray_alignment="yaw" if sc.attach_yaw_only else "base",
             )
+        except TypeError:  # older versions only know attach_yaw_only
+            return RayCasterCfg(**kwargs, attach_yaw_only=sc.attach_yaw_only)
 
     def _build_contact_sensor(x: ExperimentCfg) -> ContactSensorCfg:
         return ContactSensorCfg(
