@@ -67,10 +67,14 @@ def compute_reward(
         torch.sum((action - prev_action) ** 2, dim=-1) * w.smooth_w, -2.0, 0.0
     )
 
-    # ── 8. Alive bonus ──────────────────────────────────────────────────
-    r_alive = torch.full(
-        (robot_pos.shape[0],), w.alive_bonus,
-        device=robot_pos.device, dtype=robot_pos.dtype,
+    # ── 8. Alive bonus (only while upright and at height) ───────────────
+    # Gated on not-fallen so it rewards survival rather than acting as a
+    # constant per-step offset (it used to be paid even on the fall step).
+    fallen = (base_height < w.fall_height) | (tilt_rad > w.fall_tilt_rad)
+    r_alive = torch.where(
+        fallen,
+        torch.zeros_like(base_height),
+        torch.full_like(base_height, w.alive_bonus),
     )
 
     # ── 9. Heading (face toward goal) ───────────────────────────────────
@@ -95,7 +99,10 @@ def compute_reward(
     )
 
     # ── Total ───────────────────────────────────────────────────────────
-    total = (r_progress + r_goal + r_collision + r_near
+    # r_progress and r_vel_track were redundant (both reward velocity toward
+    # the goal). vel_track is the better-shaped term, so progress is dropped
+    # from the objective and kept in `info` for monitoring only.
+    total = (r_goal + r_collision + r_near
              + r_upright + r_height + r_energy + r_smooth
              + r_alive + r_heading + r_vel_track)
     total = torch.where(torch.isfinite(total), total, torch.zeros_like(total))

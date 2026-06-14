@@ -108,6 +108,10 @@ class PPOTrainer:
         self._base_lr = tc.lr
         self._total_updates = max(1, tc.total_updates)
         self._cur_lr = tc.lr
+        # Entropy-coefficient anneal (base -> ent_coef_final over the run) so
+        # late-stage exploration noise stops inflating the action std.
+        self._base_ent_coef = tc.ent_coef
+        self._cur_ent_coef = tc.ent_coef
 
     # ──────────────────────────────────────────────────────────────────
     @torch.no_grad()
@@ -339,19 +343,16 @@ class PPOTrainer:
         pg_loss2 = torch.clamp(ratio, 1 - tc.clip_eps, 1 + tc.clip_eps) * adv
         policy_loss = -torch.mean(torch.minimum(pg_loss1, pg_loss2))
 
-        # Penalize the Gaussian mean drifting outside the [-1, 1] action
-        # range: sampled actions are clamped there, so an unbounded mean
-        # saturates actions and biases the clamped-sample log-probs.
-        bounds_loss = torch.mean((mean.abs() - 1.0).clamp(min=0.0) ** 2)
-
         # ── Value loss (simple MSE on normalized returns) ────────────
         value_loss = 0.5 * torch.mean((value - mb.ret) ** 2)
         value_loss = torch.clamp(value_loss, 0.0, 1_000_000.0)
 
         entropy = torch.mean(gaussian_entropy(log_std))
 
+        # The actor mean is tanh-squashed into (-1, 1) (see networks.Actor),
+        # so the old action-bounds penalty was identically zero — dropped.
         total = (policy_loss + tc.vf_coef * value_loss
-                 - tc.ent_coef * entropy + 10.0 * bounds_loss)
+                 - self._cur_ent_coef * entropy)
         total = torch.clamp(total, -1e6, 1e6)
         if not torch.isfinite(total):
             total = torch.tensor(0.0, device=total.device, requires_grad=True)
@@ -384,9 +385,9 @@ class PPOTrainer:
 
         return {
             "policy_loss": policy_loss.item(),
-            "bounds_loss": bounds_loss.item(),
             "value_loss": value_loss.item(),
             "entropy": entropy.item(),
+            "ent_coef": self._cur_ent_coef,
             "total_loss": total.item(),
             "ratio_mean": ratio.mean().item(),
             "ratio_max": ratio.max().item(),
@@ -406,12 +407,14 @@ class PPOTrainer:
 
     # ──────────────────────────────────────────────────────────────────
     def anneal_lr(self, update_idx: int) -> float:
-        """Linear LR decay over the run; 1-indexed; PPO optimizer only."""
+        """Linear LR + entropy-coef decay over the run; 1-indexed; PPO only."""
         frac = max(0.0, 1.0 - (update_idx - 1) / float(self._total_updates))
         new_lr = self._base_lr * frac
         for pg in self.optimizer.param_groups:
             pg["lr"] = new_lr
         self._cur_lr = new_lr
+        ef = self.cfg.teacher.ent_coef_final
+        self._cur_ent_coef = ef + (self._base_ent_coef - ef) * frac
         return new_lr
 
     # ──────────────────────────────────────────────────────────────────
@@ -439,7 +442,7 @@ class PPOTrainer:
                 kl_sum += float(info["approx_kl"])
                 kl_n += 1
                 skipped_total += int(info.get("skipped_step", 0))
-                if kl_sum / max(1, kl_n) > tc.target_kl:
+                if kl_sum / max(1, kl_n) > 1.5 * tc.target_kl:
                     early_stop_epoch = epoch + 1
                     stop = True
                     break

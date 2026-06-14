@@ -59,7 +59,7 @@ class RobotCfg:
 @dataclass
 class RewardWeightsCfg:
     """Weights for reward.compute_reward(). Values preserved from config.py."""
-    goal_bonus: float = 200.0
+    goal_bonus: float = 10.0
     goal_tol: float = 0.5          # m
     progress_w: float = 50.0
     collision_pen: float = -10.0
@@ -68,7 +68,7 @@ class RewardWeightsCfg:
     upright_w: float = -0.3
     height_w: float = -1.0
     target_height: float = 0.5      # m, nominal base height over terrain
-    energy_w: float = -0.005
+    energy_w: float = -0.0005       # 10x lower: a regularizer, not the dominant term
     smooth_w: float = -0.002
     alive_bonus: float = 0.5
     heading_w: float = 0.3
@@ -126,12 +126,22 @@ class TerrainCfg:
 
 @dataclass
 class CurriculumCfg:
-    """Per-env terrain level promotion/demotion, applied at reset."""
+    """Per-env terrain level promotion/demotion, applied at reset.
+
+    Three-way (Rudin 2022 style) with a "stay band": promote only on a clear
+    success (reached goal, or covered >= promote_progress_frac of the start
+    distance), demote only on a clear failure (fell, or covered <
+    demote_progress_frac). Episodes in between hold their level, so one
+    mediocre rollout no longer bounces an env down to flat ground.
+    """
     enabled: bool = True
     promote_on_goal: bool = True
     demote_on_fall: bool = True
-    # Timeout with < this fraction of the initial goal distance covered -> demote
-    demote_progress_frac: float = 0.5
+    # Survived and covered >= this fraction of the start distance -> promote
+    promote_progress_frac: float = 0.8
+    # Covered < this fraction (and didn't fall) -> demote. Raised from 0.5,
+    # which demoted nearly every episode and collapsed the curriculum to flat.
+    demote_progress_frac: float = 0.25
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -283,7 +293,8 @@ class TeacherTrainCfg:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.005         # lowered from 0.01 (action std was inflating)
+    ent_coef_final: float = 0.0     # entropy bonus annealed to this over the run
     vf_coef: float = 1.0
     max_grad: float = 1.5
     lr: float = 3e-4
