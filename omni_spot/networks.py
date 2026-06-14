@@ -60,15 +60,22 @@ class ScandotEncoder(nn.Module):
 
 
 class PrivEncoder(nn.Module):
-    """Privileged obs -> latent z_t. Teacher-only; never deployed."""
+    """Privileged obs -> latent z_t. Teacher-only; never deployed.
+
+    The output is LayerNorm'd so z stays unit-scale as the encoder trains.
+    Without it, z drifts upward in magnitude and the adaptation module phi
+    (which regresses onto z.detach()) chases a moving target -> adapt_loss
+    diverges and the Phase 2 student inherits a useless extrinsics estimator.
+    """
 
     def __init__(self, cfg: ExperimentCfg):
         super().__init__()
         pc = cfg.policy
         self.net = _mlp(cfg.priv_dim, pc.priv_hidden, pc.z_dim)
+        self.norm = nn.LayerNorm(pc.z_dim)
 
     def forward(self, priv: torch.Tensor) -> torch.Tensor:
-        return self.net(priv)
+        return self.norm(self.net(priv))
 
 
 class AdaptationModule(nn.Module):

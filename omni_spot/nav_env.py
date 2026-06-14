@@ -203,10 +203,17 @@ if HAS_ISAAC:
                 )
                 at_goal = self._at_goal[env_ids]
                 fallen = self._fallen[env_ids]
-                move_up = at_goal & x.curriculum.promote_on_goal
-                move_down = (fallen & x.curriculum.demote_on_fall) | (
+                cur = x.curriculum
+                # Promote on a clear success; demote only on a fall or on
+                # genuinely poor progress. Episodes between the two thresholds
+                # hold their level (the "stay band"), so a single bad rollout
+                # no longer bounces an env down to flat ground.
+                move_up = (at_goal & cur.promote_on_goal) | (
+                    ~fallen & (progress >= cur.promote_progress_frac)
+                )
+                move_down = (fallen & cur.demote_on_fall) | (
                     ~at_goal & ~fallen
-                    & (progress < x.curriculum.demote_progress_frac)
+                    & (progress < cur.demote_progress_frac)
                 )
                 try:
                     self.scene.terrain.update_env_origins(
