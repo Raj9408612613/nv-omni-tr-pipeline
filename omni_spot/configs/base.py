@@ -68,7 +68,7 @@ class RewardWeightsCfg:
     upright_w: float = -0.3
     height_w: float = -1.0
     target_height: float = 0.5      # m, nominal base height over terrain
-    energy_w: float = -0.0005
+    energy_w: float = -0.005
     smooth_w: float = -0.002
     alive_bonus: float = 0.5
     heading_w: float = 0.3
