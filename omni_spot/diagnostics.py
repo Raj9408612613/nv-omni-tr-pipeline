@@ -16,7 +16,8 @@ def compute_explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> float:
 
 
 def print_diagnostics(update: int, rollout_diag: dict, update_diag: dict,
-                      max_grad: float = 1.5):
+                      max_grad: float = 1.5, vf_coef: float = 1.0,
+                      ent_coef=None):
     """Print a diagnostic block to stdout."""
     lines = []
     lines.append("")
@@ -61,9 +62,11 @@ def print_diagnostics(update: int, rollout_diag: dict, update_diag: dict,
     # ── 4. Loss Components ───────────────────────────────────────────
     lines.append("")
     lines.append("  [LOSS COMPONENTS]")
+    _vf = float(ud.get("vf_coef", vf_coef))
+    _ec = float(ud.get("ent_coef", ent_coef if ent_coef is not None else 0.0))
     lines.append(f"    policy_loss    : {ud.get('policy_loss', 0.0):>12.6f}")
-    lines.append(f"    value_loss     : {ud.get('value_loss', 0.0):>12.6f}  (xVF_COEF=0.5 -> {ud.get('value_loss', 0.0)*0.5:>12.6f})")
-    lines.append(f"    entropy_bonus  : {ud.get('entropy', 0.0):>12.6f}  (xENT_COEF=0.01 -> {ud.get('entropy', 0.0)*0.01:>12.6f})")
+    lines.append(f"    value_loss     : {ud.get('value_loss', 0.0):>12.6f}  (xVF_COEF={_vf:g} -> {ud.get('value_loss', 0.0)*_vf:>12.6f})")
+    lines.append(f"    entropy_bonus  : {ud.get('entropy', 0.0):>12.6f}  (xENT_COEF={_ec:g} -> {ud.get('entropy', 0.0)*_ec:>12.6f})")
     lines.append(f"    total_loss     : {ud.get('total_loss', 0.0):>12.6f}")
 
     # ── 5. Gradient Health ───────────────────────────────────────────
