@@ -269,6 +269,32 @@ def run_teacher(cfg, a) -> int:
         trainer.load(a.resume)
         print(f"[INIT] Resumed from {a.resume}")
 
+    # ── Config banner: make every run self-identifying ───────────────
+    # A training log should never hide which code/hyperparameters
+    # produced it — a stale checkout silently re-running old config is
+    # otherwise invisible until the numbers are picked apart by hand.
+    try:
+        _sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:  # noqa: BLE001 — informational only
+        _sha = "unknown"
+    _rw, _cu = cfg.reward, cfg.curriculum
+    _norm = "on" if hasattr(trainer.net.priv_encoder, "norm") else "OFF"
+    print(
+        f"[CONFIG] git={_sha}  energy_w={_rw.energy_w:g}  "
+        f"goal_bonus={_rw.goal_bonus:g}  alive_bonus={_rw.alive_bonus:g}  "
+        f"promote/demote="
+        f"{getattr(_cu, 'promote_progress_frac', float('nan')):g}/"
+        f"{getattr(_cu, 'demote_progress_frac', float('nan')):g}  "
+        f"ent_coef={tc.ent_coef:g}->"
+        f"{getattr(tc, 'ent_coef_final', float('nan')):g}  "
+        f"priv_latent_norm={_norm}",
+        flush=True,
+    )
+
     run_id = datetime.now().strftime("teacher_%Y%m%d_%H%M%S")
     logger = SimpleLogger(a.log_dir, run_id, TEACHER_CSV_FIELDS)
     print(f"[INIT] Logging to {logger.log_dir}")
@@ -322,7 +348,8 @@ def run_teacher(cfg, a) -> int:
                 print(f"    profile: {stats['_timing']}")
         if update == 1 or update % 25 == 0:
             print_diagnostics(update, stats.get("_diag", {}), info,
-                              max_grad=tc.max_grad)
+                              max_grad=tc.max_grad, vf_coef=tc.vf_coef,
+                              ent_coef=tc.ent_coef)
         if update == 1:
             report_gpu_memory("after update 1")
 
