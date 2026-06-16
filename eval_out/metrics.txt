@@ -1,8 +1,0 @@
-checkpoint     : student_best_20260615.pt
-phase          : student
-envs x steps   : 64 x 1000
-episodes ended : 109
-goals reached  : 39
-falls/collide  : 27
-timeouts       : 43
-SUCCESS RATE   : 0.358   (goals / episodes_ended)
