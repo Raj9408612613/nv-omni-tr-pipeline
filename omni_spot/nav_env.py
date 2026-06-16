@@ -124,6 +124,11 @@ if HAS_ISAAC:
             self._just_reset = torch.ones(
                 B, dtype=torch.bool, device=self.device
             )
+            # Optional per-env reward-weight override (PBT). None => every env
+            # uses the scalar self._x.reward, i.e. the original teacher
+            # behavior. When set by train_pbt it is a RewardWeightsCfg whose 4
+            # PBT knobs are (B,) tensors tiled across each member's env slice.
+            self._reward_weights = None
             self._base_height = torch.full(
                 (B,), x.reward.target_height, device=self.device
             )
@@ -506,8 +511,15 @@ if HAS_ISAAC:
                     (self.num_envs,), 1e6, device=self.device
                 )
 
+            # Per-env reward weights (PBT) when set, else the scalar x.reward.
+            # check_termination (in _get_dones) keeps the scalar thresholds —
+            # fall_height / fall_tilt / goal_tol are not PBT knobs.
+            reward_w = (
+                self._reward_weights if self._reward_weights is not None
+                else x.reward
+            )
             reward, info, new_dist = compute_reward(
-                x.reward,
+                reward_w,
                 robot_pos=root_pos,
                 robot_quat=robot.data.root_quat_w,
                 goal_pos=self._goal,

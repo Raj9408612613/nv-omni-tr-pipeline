@@ -70,12 +70,17 @@ def compute_reward(
     # ── 8. Alive bonus (only while upright and at height) ───────────────
     # Gated on not-fallen so it rewards survival rather than acting as a
     # constant per-step offset (it used to be paid even on the fall step).
+    # alive_bonus may be a scalar OR a per-env (N,) tensor (PBT per-env reward
+    # weights). torch.full_like takes a *scalar* fill and raises on a tensor,
+    # so broadcast the bonus through torch.where instead. as_tensor leaves an
+    # existing tensor untouched and promotes a Python float to a 0-d tensor;
+    # both broadcast cleanly against the (N,) zeros — bit-identical to the old
+    # full_like result in the scalar case.
     fallen = (base_height < w.fall_height) | (tilt_rad > w.fall_tilt_rad)
-    r_alive = torch.where(
-        fallen,
-        torch.zeros_like(base_height),
-        torch.full_like(base_height, w.alive_bonus),
+    alive_bonus = torch.as_tensor(
+        w.alive_bonus, dtype=base_height.dtype, device=base_height.device
     )
+    r_alive = torch.where(fallen, torch.zeros_like(base_height), alive_bonus)
 
     # ── 9. Heading (face toward goal) ───────────────────────────────────
     goal_dir = goal_pos - robot_xy
@@ -106,7 +111,15 @@ def compute_reward(
              + r_upright + r_height + r_energy + r_smooth
              + r_alive + r_heading + r_vel_track)
     total = torch.where(torch.isfinite(total), total, torch.zeros_like(total))
-    total = torch.clamp(total, -20.0, w.goal_bonus + 10.0)
+    # Upper bound is goal_bonus + 10, which may be scalar OR per-env (N,).
+    # torch.clamp cannot mix a scalar min with a tensor max (raises TypeError),
+    # so apply the min via clamp and the per-env max via minimum. For the
+    # scalar case this is bit-identical to clamp(total, -20, goal_bonus + 10).
+    total = torch.clamp(total, min=-20.0)
+    goal_cap = torch.as_tensor(
+        w.goal_bonus + 10.0, dtype=total.dtype, device=total.device
+    )
+    total = torch.minimum(total, goal_cap)
 
     info = {
         "r_progress": r_progress,
