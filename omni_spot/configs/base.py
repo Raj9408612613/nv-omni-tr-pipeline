@@ -59,7 +59,7 @@ class RobotCfg:
 @dataclass
 class RewardWeightsCfg:
     """Weights for reward.compute_reward(). Values preserved from config.py."""
-    goal_bonus: float = 10.0
+    goal_bonus: float = 25.0       # was 10.0 — arrival must actually pay
     goal_tol: float = 0.5          # m
     progress_w: float = 50.0
     collision_pen: float = -10.0
@@ -70,9 +70,9 @@ class RewardWeightsCfg:
     target_height: float = 0.5      # m, nominal base height over terrain
     energy_w: float = -0.0005       # 10x lower: a regularizer, not the dominant term
     smooth_w: float = -0.002
-    alive_bonus: float = 0.5
+    alive_bonus: float = 0.05      # was 0.5 — killed survival-farming
     heading_w: float = 0.3
-    vel_track_w: float = 1.0
+    vel_track_w: float = 1.5       # was 1.0 — stronger goal-seeking
     vel_track_cap: float = 1.5      # m/s
     # Termination thresholds (check_termination)
     fall_height: float = 0.2        # m over terrain

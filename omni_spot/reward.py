@@ -102,7 +102,7 @@ def compute_reward(
     # r_progress and r_vel_track were redundant (both reward velocity toward
     # the goal). vel_track is the better-shaped term, so progress is dropped
     # from the objective and kept in `info` for monitoring only.
-    total = (r_goal + r_collision + r_near
+    total = (r_progress + r_goal + r_collision + r_near
              + r_upright + r_height + r_energy + r_smooth
              + r_alive + r_heading + r_vel_track)
     total = torch.where(torch.isfinite(total), total, torch.zeros_like(total))
