@@ -1,8 +1,8 @@
-checkpoint     : student_best_20260615.pt
+checkpoint     : omni_logs/student_20260616_091307/best.pt
 phase          : student
 envs x steps   : 64 x 1000
-episodes ended : 109
-goals reached  : 39
-falls/collide  : 27
-timeouts       : 43
-SUCCESS RATE   : 0.358   (goals / episodes_ended)
+episodes ended : 793
+goals reached  : 721
+falls/collide  : 71
+timeouts       : 1
+SUCCESS RATE   : 0.909   (goals / episodes_ended)
