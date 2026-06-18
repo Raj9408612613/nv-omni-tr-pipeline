@@ -112,6 +112,10 @@ class PPOTrainer:
         # late-stage exploration noise stops inflating the action std.
         self._base_ent_coef = tc.ent_coef
         self._cur_ent_coef = tc.ent_coef
+        # PPO clip epsilon as an instance attribute (defaults to the config
+        # value, so the teacher is unchanged). PBT overrides this per member,
+        # which is why ppo_update_step reads self._clip_eps, not tc.clip_eps.
+        self._clip_eps = tc.clip_eps
 
     # ──────────────────────────────────────────────────────────────────
     @torch.no_grad()
@@ -207,6 +211,31 @@ class PPOTrainer:
         # Bootstrap value for the last state (normalized scale)
         _, _, last_value = self.sample_action(obs)
 
+        timing = (
+            {"inference_sec": t_inference, "env_step_sec": t_env_step}
+            if profile else None
+        )
+        batch, rollout_stats = self._finalize_rollout(
+            buf, last_value, adapt_losses, reward_sums, reward_count, timing
+        )
+        return obs, batch, rollout_stats
+
+    # ──────────────────────────────────────────────────────────────────
+    def _finalize_rollout(
+        self,
+        buf: dict,
+        last_value: torch.Tensor,
+        adapt_losses: list,
+        reward_sums,
+        reward_count: int,
+        timing: dict | None = None,
+    ) -> tuple["RolloutBatch", dict]:
+        """Turn collected per-step buffers + the bootstrap value into a
+        (RolloutBatch, rollout_stats). Extracted verbatim from collect_rollout
+        so the per-member PBT loop reuses the EXACT GAE / return-normalization /
+        advantage-normalization / batch-assembly path — the correctness
+        reference. Mutates self._ret_mean / self._ret_std (per-trainer stats)."""
+        tc = self.cfg.teacher
         rewards = torch.stack(buf["reward"])
         dones = torch.stack(buf["done"])
         stacked_values = torch.stack(buf["value"])          # (T, B) normalized
@@ -306,13 +335,10 @@ class PPOTrainer:
                 k: float(v.mean() / reward_count) for k, v in reward_sums.items()
             }
 
-        if profile:
-            rollout_stats["_timing"] = {
-                "inference_sec": t_inference,
-                "env_step_sec": t_env_step,
-            }
+        if timing is not None:
+            rollout_stats["_timing"] = timing
 
-        return obs, batch, rollout_stats
+        return batch, rollout_stats
 
     # ──────────────────────────────────────────────────────────────────
     def ppo_update_step(self, mb: RolloutBatch) -> dict:
@@ -339,8 +365,9 @@ class PPOTrainer:
         ratio = torch.exp(log_ratio)
 
         adv = torch.clamp(mb.advantage, -5.0, 5.0)
+        clip_eps = self._clip_eps
         pg_loss1 = ratio * adv
-        pg_loss2 = torch.clamp(ratio, 1 - tc.clip_eps, 1 + tc.clip_eps) * adv
+        pg_loss2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv
         policy_loss = -torch.mean(torch.minimum(pg_loss1, pg_loss2))
 
         # ── Value loss (simple MSE on normalized returns) ────────────
@@ -379,7 +406,7 @@ class PPOTrainer:
         with torch.no_grad():
             approx_kl = torch.mean((ratio - 1.0) - log_ratio).item()
             clip_frac = torch.mean(
-                ((ratio < 1.0 - tc.clip_eps) | (ratio > 1.0 + tc.clip_eps))
+                ((ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps))
                 .float()
             ).item()
 

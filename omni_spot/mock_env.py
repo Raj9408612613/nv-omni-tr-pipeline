@@ -103,6 +103,14 @@ class MockEnv:
         self._base_height = torch.full(
             (B,), cfg.reward.target_height, device=self.device
         )
+        # Termination flags, mirrored from NavEnv so fitness/eval code can read
+        # them identically on either env (PBT success-rate uses _at_goal).
+        self._at_goal = torch.zeros(B, dtype=torch.bool, device=self.device)
+        self._fallen = torch.zeros(B, dtype=torch.bool, device=self.device)
+        # Optional per-env reward-weight override (PBT). None => use the scalar
+        # cfg.reward for every env, i.e. the original single-policy behavior.
+        # A RewardWeightsCfg whose 4 PBT knobs are (B,) tensors when set.
+        self._reward_weights = None
 
     # ── Reset ─────────────────────────────────────────────────────────
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -324,8 +332,15 @@ class MockEnv:
             self._box_pos[:, :, :2] - self._pos[:, None, :2], dim=-1
         )
         min_obs_dist = dists.min(dim=-1).values
+        # Per-env reward weights (PBT) when set, else the scalar cfg.reward.
+        # Only compute_reward sees per-env weights; check_termination keeps the
+        # scalar thresholds (fall_height / fall_tilt / goal_tol are not knobs).
+        reward_w = (
+            self._reward_weights if self._reward_weights is not None
+            else cfg.reward
+        )
         reward, self._reward_info, new_dist = compute_reward(
-            cfg.reward,
+            reward_w,
             robot_pos=self._pos,
             robot_quat=quat,
             goal_pos=self._goal,
@@ -350,6 +365,8 @@ class MockEnv:
             step_count=self._step_count,
             max_steps=cfg.goal.episode_len_steps,
         )
+        self._at_goal = at_goal
+        self._fallen = fallen
         terminated = fallen | at_goal
         truncated = timeout & ~terminated
 
