@@ -66,12 +66,13 @@ class _Phase:
 # ── Args ─────────────────────────────────────────────────────────────────────
 _parser = argparse.ArgumentParser(description="Population-Based Training teacher")
 _parser.add_argument("--robot", type=str, default="spot")
-_parser.add_argument("--pop_size", type=int, default=24)
-_parser.add_argument("--envs_per_member", type=int, default=2048)
+# None => use the per-robot cfg.pbt value (PBTCfg); CLI overrides when given.
+_parser.add_argument("--pop_size", type=int, default=None)
+_parser.add_argument("--envs_per_member", type=int, default=None)
 _parser.add_argument("--total_updates", type=int, default=1500)
-_parser.add_argument("--pbt_interval", type=int, default=50)
-_parser.add_argument("--pbt_warmup", type=int, default=100)
-_parser.add_argument("--fitness_dist_weight", type=float, default=0.1)
+_parser.add_argument("--pbt_interval", type=int, default=None)
+_parser.add_argument("--pbt_warmup", type=int, default=None)
+_parser.add_argument("--fitness_dist_weight", type=float, default=None)
 _parser.add_argument("--update_mode", choices=["loop", "vmap"], default="loop",
                      help="loop = sequential per-member PPO (reference); "
                           "vmap = batched functional_call+vmap update")
@@ -198,10 +199,18 @@ def main() -> int:
         print("[WARN] CUDA unavailable; falling back to CPU.", flush=True)
         device = "cpu"
 
+    # Resolve PBT scale/schedule: CLI flag wins, else the per-robot cfg.pbt.
+    def _pick(cli, cfg_val):
+        return cfg_val if cli is None else cli
+    pop_size = _pick(args.pop_size, cfg.pbt.pop_size)
+    envs_per_member = _pick(args.envs_per_member, cfg.pbt.envs_per_member)
+    pbt_interval = _pick(args.pbt_interval, cfg.pbt.pbt_interval)
+    pbt_warmup = _pick(args.pbt_warmup, cfg.pbt.pbt_warmup)
+
     # ── Population (members + per-env reward-weight tiling) ──────────────
     with _Phase("Population construction"):
         pop = Population(
-            cfg, n_members=args.pop_size, envs_per_member=args.envs_per_member,
+            cfg, n_members=pop_size, envs_per_member=envs_per_member,
             device=device, seed=args.seed,
             fitness_dist_weight=args.fitness_dist_weight,
             init_ckpt=args.init_ckpt,
@@ -221,9 +230,9 @@ def main() -> int:
     # any resume, since load reallocates them).
     env._reward_weights = pop.reward_weights
 
-    print(f"[CONFIG] pop_size={args.pop_size} envs_per_member="
-          f"{args.envs_per_member} total_envs={total_envs} n_steps={n_steps} "
-          f"interval={args.pbt_interval} warmup={args.pbt_warmup} "
+    print(f"[CONFIG] pop_size={pop_size} envs_per_member="
+          f"{envs_per_member} total_envs={total_envs} n_steps={n_steps} "
+          f"interval={pbt_interval} warmup={pbt_warmup} "
           f"update_mode={args.update_mode} device={device} mock={args.mock}",
           flush=True)
 
@@ -312,8 +321,8 @@ def main() -> int:
                   flush=True)
 
         # ── PBT: exploit / explore ──────────────────────────────────────
-        do_pbt = (update >= args.pbt_warmup
-                  and update % args.pbt_interval == 0
+        do_pbt = (update >= pbt_warmup
+                  and update % pbt_interval == 0
                   and probe == 0)
         if do_pbt:
             events = pop.evolve()
@@ -356,15 +365,15 @@ def main() -> int:
 
     if probe > 0:
         report_gpu_memory(f"after {probe} probe updates")
-        print(f"[PROBE] {probe} updates done for pop_size={args.pop_size}, "
-              f"envs_per_member={args.envs_per_member}. See peak VRAM above.",
+        print(f"[PROBE] {probe} updates done for pop_size={pop_size}, "
+              f"envs_per_member={envs_per_member}. See peak VRAM above.",
               flush=True)
     else:
         _save_full(os.path.join(out_dir, "population_final.pt"), pop, last_updates)
         pop.top_member().trainer.save(os.path.join(out_dir, "best.pt"))
         with open(os.path.join(args.log_dir, "SUCCESS"), "w") as f:
             f.write(f"phase=pbt robot={cfg.robot.name} "
-                    f"pop_size={args.pop_size} timesteps={timesteps} "
+                    f"pop_size={pop_size} timesteps={timesteps} "
                     f"run={run_id}\n")
         print(f"[DONE] PBT complete: {timesteps:,} timesteps. "
               f"Best fitness {best_fitness:.3f}. Artifacts in {out_dir}",

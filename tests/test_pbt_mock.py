@@ -77,6 +77,25 @@ def test_reward_weight_tiling_matches_member_knobs():
             ), f"member {m.id} knob {knob} not tiled"
 
 
+def test_search_space_is_config_driven():
+    """A different embodiment can declare its own PBT ranges via cfg.pbt; the
+    population must sample (and clamp) within THOSE ranges, not the Spot
+    defaults hardcoded anywhere."""
+    cfg = _cfg()
+    cfg.pbt.goal_bonus_range = (100.0, 200.0)     # unlike the Spot default
+    cfg.pbt.progress_w_range = (1.0, 2.0)
+    pop = Population(
+        cfg, n_members=N_MEMBERS, envs_per_member=ENVS_PER_MEMBER,
+        device="cpu", seed=0,
+    )
+    for m in pop.members:
+        assert 100.0 <= m.knobs["goal_bonus"] <= 200.0
+        assert 1.0 <= m.knobs["progress_w"] <= 2.0
+    # The tiled per-env weights reflect the custom range too.
+    gb = getattr(pop.reward_weights, "goal_bonus")
+    assert float(gb.min()) >= 100.0 and float(gb.max()) <= 200.0
+
+
 def test_members_have_distinct_knobs_in_range():
     _, pop, _ = _make_pop_env(seed=1)
     for knob, (lo, hi) in ALL_KNOB_RANGES.items():

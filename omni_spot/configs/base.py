@@ -327,6 +327,46 @@ class StudentTrainCfg:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Population-Based Training (Phase-1 teacher search)
+# ════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PBTCfg:
+    """Per-robot PBT search space + schedule.
+
+    Lives on ExperimentCfg so each embodiment declares its OWN knob ranges —
+    reward magnitudes differ across robots, so a search space tuned for Spot
+    must not be hardcoded into the trainer. train_pbt CLI flags override these
+    when provided; otherwise these per-robot values are the source of truth.
+
+    The 4 reward knobs are tiled per-env; the 3 PPO knobs are per-member. Ranges
+    are (lo, hi) and are also the clamp bounds used after each perturbation.
+    """
+    # Population scale (VRAM-gated; see plan Phase 5).
+    pop_size: int = 24
+    envs_per_member: int = 2048
+    # Schedule.
+    pbt_interval: int = 50          # evolve every N updates
+    pbt_warmup: int = 100           # no PBT before this update
+    # Weight-free fitness = success_rate - fitness_dist_weight * mean_final_dist.
+    fitness_dist_weight: float = 0.1
+    # Reward-knob ranges (must stay within what reward.compute_reward expects).
+    alive_bonus_range: tuple[float, float] = (0.0, 0.2)
+    progress_w_range: tuple[float, float] = (10.0, 100.0)
+    vel_track_w_range: tuple[float, float] = (0.5, 3.0)
+    goal_bonus_range: tuple[float, float] = (10.0, 50.0)
+    # PPO-knob ranges.
+    clip_eps_range: tuple[float, float] = (0.1, 0.3)
+    ent_coef_range: tuple[float, float] = (0.0, 0.02)
+    lr_range: tuple[float, float] = (1e-5, 1e-3)
+    # Exploration: each perturbed knob is multiplied by a random factor, clamped.
+    perturb_factors: tuple[float, ...] = (0.8, 1.2)
+    # Initial ent_coef floor: multiplicative perturbation cannot revive a knob
+    # that started at exactly 0, so members are seeded strictly positive.
+    ent_coef_min_init: float = 1e-3
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Aggregate
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -346,6 +386,7 @@ class ExperimentCfg:
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     teacher: TeacherTrainCfg = field(default_factory=TeacherTrainCfg)
     student: StudentTrainCfg = field(default_factory=StudentTrainCfg)
+    pbt: PBTCfg = field(default_factory=PBTCfg)
 
     # ── Derived dimensions (the only place they are defined) ─────────
     @property
