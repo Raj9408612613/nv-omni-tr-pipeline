@@ -293,7 +293,20 @@ class Population:
         return obs, batches, stats
 
     # ── per-member update (loop = correctness reference) ──────────────
-    def update_members(self, batches: list) -> list[dict]:
+    def update_members(self, batches: list, mode: str = "loop") -> list[dict]:
+        """Update every member's PPO net.
+
+        mode="loop"  (default): sequential per-member PPOTrainer.update — the
+            validated reference path (keeps KL early stopping + independent
+            shuffles).
+        mode="vmap": batch the N forward/backward passes with functional_call +
+            vmap (pbt_vmap). Faster at high N; drops per-member early stopping.
+        """
+        if mode == "vmap":
+            from .pbt_vmap import vmap_update_members
+            return vmap_update_members(self, batches)
+        if mode != "loop":
+            raise ValueError(f"unknown update mode {mode!r} (loop|vmap)")
         infos = []
         for m, batch in zip(self.members, batches):
             m.apply_knobs_to_trainer()

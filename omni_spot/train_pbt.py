@@ -72,6 +72,9 @@ _parser.add_argument("--total_updates", type=int, default=1500)
 _parser.add_argument("--pbt_interval", type=int, default=50)
 _parser.add_argument("--pbt_warmup", type=int, default=100)
 _parser.add_argument("--fitness_dist_weight", type=float, default=0.1)
+_parser.add_argument("--update_mode", choices=["loop", "vmap"], default="loop",
+                     help="loop = sequential per-member PPO (reference); "
+                          "vmap = batched functional_call+vmap update")
 _parser.add_argument("--n_steps", type=int, default=None,
                      help="Rollout horizon (default: cfg.teacher.n_steps)")
 _parser.add_argument("--seed", type=int, default=42)
@@ -221,7 +224,8 @@ def main() -> int:
     print(f"[CONFIG] pop_size={args.pop_size} envs_per_member="
           f"{args.envs_per_member} total_envs={total_envs} n_steps={n_steps} "
           f"interval={args.pbt_interval} warmup={args.pbt_warmup} "
-          f"device={device} mock={args.mock}", flush=True)
+          f"update_mode={args.update_mode} device={device} mock={args.mock}",
+          flush=True)
 
     run_id = datetime.now().strftime("pbt_%Y%m%d_%H%M%S")
     out_dir = os.path.join(args.log_dir, run_id)
@@ -266,7 +270,7 @@ def main() -> int:
         rollout_sec = time.time() - t0
 
         t0 = time.time()
-        infos = pop.update_members(batches)
+        infos = pop.update_members(batches, mode=args.update_mode)
         update_sec = time.time() - t0
 
         timesteps += total_envs * n_steps
