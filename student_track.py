@@ -121,10 +121,20 @@ def _isaac_terrain_classes():
             HfInvertedPyramidStairsTerrainCfg, Cam)
 
 
-def _build_lane_terrain(su, TI, TG, Flat, StairUp, StairDown):
-    """A single ROW of sub-terrains the robots cross in sequence:
-    flat -> stairs up -> stairs down -> rough -> flat(goal). num_rows=1 so it
-    is a straight lane, num_cols = number of segments.
+def _build_lane_terrain(su, TI, TG, Flat, StairUp, StairDown, num_envs):
+    """Grid of `num_envs` ROWS, each row a lane of `num_cols` segments.
+
+    CRITICAL: num_rows MUST equal num_envs. Isaac Lab distributes the N robots
+    across the rows*cols tile grid; if the tile grid is smaller than N, the
+    per-env origin/terrain-level lookup indexes out of bounds (the crash we
+    hit with num_rows=1). One row per robot keeps the mapping in range and
+    gives each robot its own identical lane.
+
+    Each lane runs along the COLUMNS: flat -> stairs up -> stairs down ->
+    rough -> flat(goal). NOTE: with the stock generator, sub_terrains are
+    placed by proportion and the exact left-to-right ORDER within a row is not
+    guaranteed; if the sequence looks shuffled, that is the generator, not a
+    bug, and we iterate on it.
     """
     seg = 3.0  # m per segment (close to training patch scale)
     return TI(
@@ -134,8 +144,8 @@ def _build_lane_terrain(su, TI, TG, Flat, StairUp, StairDown):
             seed=0,
             size=(seg, seg),
             border_width=0.5,
-            num_rows=1,           # single lane (no difficulty stacking)
-            num_cols=5,           # 5 segments in a line
+            num_rows=num_envs,    # ONE ROW PER ROBOT — fixes the index crash
+            num_cols=5,           # 5 segments per lane
             horizontal_scale=0.1,
             vertical_scale=0.005,
             slope_threshold=0.75,
@@ -176,7 +186,7 @@ def main() -> int:
     lane_ok = True
     try:
         (su, TI, TG, Flat, StairUp, StairDown, Cam) = _isaac_terrain_classes()
-        lane = _build_lane_terrain(su, TI, TG, Flat, StairUp, StairDown)
+        lane = _build_lane_terrain(su, TI, TG, Flat, StairUp, StairDown, args.num_envs)
         # env_cfg.scene stores terrain under .terrain (HAS_TERRAIN path)
         if hasattr(env_cfg.scene, "terrain"):
             env_cfg.scene.terrain = lane
@@ -187,12 +197,15 @@ def main() -> int:
         lane_ok = False
         (su, *_rest, Cam) = _isaac_terrain_classes()
 
-    # ── Static overhead/oblique camera over the lane ─────────────────────────
-    # Lane runs along +X from x=0 to ~x=goal_x. Camera placed to the side and
-    # above, looking at the lane mid-point.
-    mid = args.goal_x / 2.0
-    cam_pos = (mid, -8.0, 7.0)
-    cam_look = (mid, 0.0, 0.0)
+    # ── Static overhead camera framing ALL lanes ────────────────────────────
+    # 10 lanes are laid out as terrain ROWS (spread along Y); each lane runs
+    # along +X for ~goal_x meters. Camera high above the center, tilted to see
+    # the full set. Scales with num_envs so all rows stay in frame.
+    mid_x = args.goal_x / 2.0
+    span_y = args.num_envs * 3.0  # rows are ~seg(3m) apart
+    cam_height = max(10.0, span_y * 0.9)
+    cam_pos = (mid_x, -span_y * 0.4, cam_height)
+    cam_look = (mid_x, 0.0, 0.0)
     have_cam = True
     try:
         quat = _look_at_quat(cam_pos, cam_look)
