@@ -57,7 +57,12 @@ try:
     except ImportError:
         HAS_TERRAIN = False
     HAS_ISAAC = True
-except ImportError:
+except ImportError as _e2x:
+    # Capture the REAL Isaac Lab 2.x failure — otherwise the message below only
+    # reports the 1.x fallback ("No module named 'omni.isaac.lab'"), which
+    # hides which isaaclab.* import actually broke (e.g. a renamed symbol in a
+    # newer IsaacLab checkout).
+    _err_2x = f"{type(_e2x).__name__}: {_e2x}"
     try:
         # Isaac Lab 1.x (omniverse extension)
         import omni.isaac.lab.sim as sim_utils
@@ -92,8 +97,12 @@ except ImportError:
         except ImportError:
             HAS_TERRAIN = False
         HAS_ISAAC = True
-    except ImportError as _e:
-        _ISAAC_IMPORT_ERROR = str(_e)
+    except ImportError as _e1x:
+        _ISAAC_IMPORT_ERROR = (
+            f"isaaclab (2.x) import failed -> {_err_2x};  "
+            f"omni.isaac.lab (1.x) fallback -> "
+            f"{type(_e1x).__name__}: {_e1x}"
+        )
 
 
 if HAS_ISAAC:
