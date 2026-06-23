@@ -34,6 +34,12 @@ set -euo pipefail
 ENV_NAME="isaac"
 PY_VERSION="3.11"
 TORCH_CUDA="cu128"                 # Blackwell / driver 580. Adjust if needed.
+TORCH_INDEX="https://download.pytorch.org/whl/${TORCH_CUDA}"
+TORCH_NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/${TORCH_CUDA}"
+# Compute capability the GPU needs in torch.cuda.get_arch_list(). Blackwell
+# (RTX PRO 6000) is sm_120 — stable cu128 wheels have lacked it, so we verify
+# and fall back to nightly. Set to "" to skip the arch check on other GPUs.
+TORCH_REQUIRED_ARCH="sm_120"
 NVIDIA_DRIVER="nvidia-driver-580-open"
 SWAP_SIZE="32G"
 CONDA_DIR="$HOME/miniconda3"
@@ -48,6 +54,40 @@ RUN_TRAINING=false
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== isaac_run.sh started $(date) | repo=$REPO_DIR | env=$ENV_NAME ==="
+
+# ── Torch helpers (Blackwell sm_120 needs a recent cu128 / nightly build) ────
+torch_arch_ok() {
+    # exit 0 if torch imports AND (no required arch OR it's in the arch list)
+    python - "${TORCH_REQUIRED_ARCH:-}" <<'PY' 2>/dev/null
+import sys
+req = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    import torch
+except Exception:
+    sys.exit(1)
+sys.exit(0 if (not req or req in torch.cuda.get_arch_list()) else 2)
+PY
+}
+
+ensure_torch() {
+    # Guarantee an installed torch whose kernels cover TORCH_REQUIRED_ARCH.
+    if torch_arch_ok; then
+        echo "    torch OK: $(python -c 'import torch;print(torch.__version__)') | arch=$(python -c 'import torch;print(torch.cuda.get_arch_list())' 2>/dev/null)"
+        return 0
+    fi
+    # torch ONLY — the pipeline never imports torchvision, and on nightly
+    # torch+torchvision pin each other (ResolutionImpossible). Uninstall any
+    # stray torchvision so it can't drag torch to a non-Blackwell build.
+    echo "    [torch] need ${TORCH_REQUIRED_ARCH:-any}; (re)installing stable ${TORCH_CUDA}..."
+    pip uninstall -y torch torchvision >/dev/null 2>&1 || true
+    pip install torch --index-url "$TORCH_INDEX" || true
+    if ! torch_arch_ok; then
+        echo "    [torch] stable ${TORCH_CUDA} lacks ${TORCH_REQUIRED_ARCH}; trying nightly ${TORCH_CUDA}..."
+        pip uninstall -y torch >/dev/null 2>&1 || true
+        pip install --pre torch --index-url "$TORCH_NIGHTLY_INDEX"
+    fi
+    torch_arch_ok || echo "    [torch][WARN] ${TORCH_REQUIRED_ARCH} still missing — check pytorch.org for a Blackwell build"
+}
 
 # =============================================================================
 # Stage 0 — system packages + NVIDIA driver (reboot gate)
@@ -103,18 +143,15 @@ echo "    active python: $(python --version)"
 # =============================================================================
 # Stage 2 — PyTorch (CUDA) + sanity check
 # =============================================================================
-echo ">>> Stage 2: PyTorch ($TORCH_CUDA) + build tooling"
+echo ">>> Stage 2: PyTorch ($TORCH_CUDA, need arch ${TORCH_REQUIRED_ARCH:-any}) + build tooling"
 pip install "setuptools<75.0.0"
-if python -c "import torch" 2>/dev/null; then
-    echo "    torch already installed: $(python -c 'import torch; print(torch.__version__)')"
-else
-    pip install torch torchvision --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
-fi
+ensure_torch
 python - <<'PY'
 import torch
 ok = torch.cuda.is_available()
 name = torch.cuda.get_device_name(0) if ok else "NO GPU VISIBLE"
 print(f"    torch {torch.__version__} | cuda_available={ok} | {name}")
+print(f"    arch_list: {torch.cuda.get_arch_list()}")
 PY
 
 # =============================================================================
@@ -167,6 +204,10 @@ pip install tensorboard "imageio[ffmpeg]" h5py
 echo "    import check:"
 python -c "import isaacsim; print('      isaacsim OK')" || echo "      isaacsim FAILED"
 python -c "import isaaclab; print('      isaaclab OK')" || echo "      isaaclab FAILED"
+
+# Isaac Sim's deps can swap torch for a build without sm_120 — repair if so.
+echo ">>> Re-verifying torch arch after Isaac install"
+ensure_torch
 
 # =============================================================================
 # Stage 5 — smoke tests + (optional) full teacher training
