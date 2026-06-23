@@ -94,30 +94,47 @@ _parser.add_argument("--mock", action="store_true",
 _parser.add_argument("--device", type=str, default="cuda")
 
 # ── Launch Isaac Sim BEFORE importing Isaac Lab sub-modules (unless --mock) ──
-_HAS_APP = False
-try:
-    from isaaclab.app import AppLauncher
-    _HAS_APP = True
-except ImportError:
+# Decide mock from argv up front: in mock mode we must NOT touch Isaac at all.
+_WANT_MOCK = "--mock" in sys.argv
+AppLauncher = None
+_app_import_errs = None
+if not _WANT_MOCK:
     try:
-        from omni.isaac.lab.app import AppLauncher
-        _HAS_APP = True
-    except ImportError:
-        AppLauncher = None
+        from isaaclab.app import AppLauncher            # Isaac Lab 2.x
+    except Exception as _e1:  # noqa: BLE001 — surface the real cause below
+        try:
+            from omni.isaac.lab.app import AppLauncher  # Isaac Lab 1.x
+        except Exception as _e2:  # noqa: BLE001
+            _app_import_errs = (_e1, _e2)
 
-if _HAS_APP:
+if AppLauncher is not None:
     AppLauncher.add_app_launcher_args(_parser)
 else:
-    # Keep --headless accepted even when Isaac Lab is absent (mock runs).
+    # --mock path (or Isaac missing): keep these flags accepted so the parser
+    # does not choke on them.
     _parser.add_argument("--headless", action="store_true")
+    _parser.add_argument("--enable_cameras", action="store_true")
 
 args = _parser.parse_args()
 
 simulation_app = None
 if not args.mock:
-    if not _HAS_APP:
-        print("[ERROR] Isaac Lab not found and --mock not set. Install Isaac "
-              "Lab or pass --mock for the CPU smoke path.", flush=True)
+    if AppLauncher is None:
+        print("[ERROR] Could not import Isaac Lab (tried isaaclab.app and "
+              "omni.isaac.lab.app). This is an ENVIRONMENT problem, not a "
+              "train_pbt bug — `python -c \"import isaaclab\"` and train.py "
+              "will fail the same way.", flush=True)
+        if _app_import_errs is not None:
+            print(f"        isaaclab.app      -> "
+                  f"{type(_app_import_errs[0]).__name__}: {_app_import_errs[0]}",
+                  flush=True)
+            print(f"        omni.isaac.lab.app-> "
+                  f"{type(_app_import_errs[1]).__name__}: {_app_import_errs[1]}",
+                  flush=True)
+        print("        Fix: install Isaac Lab from your clone (see "
+              "scripts/isaac_run.sh stage 4):", flush=True)
+        print("          pip install --no-deps -e <IsaacLab>/source/isaaclab", flush=True)
+        print("        or pass --mock for the CPU smoke path.", flush=True)
         sys.exit(1)
     print("[INIT] Launching Isaac Sim (first run takes ~5 min for shader "
           "compilation)...", flush=True)
