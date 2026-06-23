@@ -193,13 +193,17 @@ if python -c "import isaaclab" 2>/dev/null; then
 else
     pushd "$ISAACLAB_DIR" >/dev/null
     pip install --no-deps -e source/isaaclab
-    pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
-        prettytable==3.3.0 flatdict
     pip install --use-deprecated=legacy-resolver -e source/isaaclab_assets
     pip install --use-deprecated=legacy-resolver -e source/isaaclab_tasks
     popd >/dev/null
 fi
-pip install tensorboard "imageio[ffmpeg]" h5py
+
+# Runtime Python deps — ALWAYS install (idempotent), even when isaaclab was
+# already -e installed. Missing any of these only surfaces much later as a
+# cryptic ModuleNotFoundError during env build (e.g. h5py), so install them
+# unconditionally rather than gating behind the clone step above.
+pip install toml gymnasium==1.2.1 trimesh einops warp-lang prettytable==3.3.0 \
+    flatdict tensorboard "imageio[ffmpeg]" h5py
 
 echo "    import check:"
 python -c "import isaacsim; print('      isaacsim OK')" || echo "      isaacsim FAILED"
