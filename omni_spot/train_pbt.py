@@ -91,7 +91,8 @@ _parser.add_argument("--vram_probe", type=int, default=0, metavar="N",
 # CPU smoke path (no Isaac Lab).
 _parser.add_argument("--mock", action="store_true",
                      help="Use the pure-PyTorch MockEnv (no Isaac Sim)")
-_parser.add_argument("--device", type=str, default="cuda")
+# NOTE: --device is provided by AppLauncher.add_app_launcher_args for real runs
+# (adding it here would collide). It is only added manually in the mock branch.
 
 # ── Launch Isaac Sim BEFORE importing Isaac Lab sub-modules (unless --mock) ──
 # Decide mock from argv up front: in mock mode we must NOT touch Isaac at all.
@@ -111,9 +112,10 @@ if AppLauncher is not None:
     AppLauncher.add_app_launcher_args(_parser)
 else:
     # --mock path (or Isaac missing): keep these flags accepted so the parser
-    # does not choke on them.
+    # does not choke on them, and supply --device (AppLauncher would otherwise).
     _parser.add_argument("--headless", action="store_true")
     _parser.add_argument("--enable_cameras", action="store_true")
+    _parser.add_argument("--device", type=str, default="cpu")
 
 args = _parser.parse_args()
 
