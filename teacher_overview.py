@@ -147,7 +147,11 @@ def _attach_overview_cam(env_cfg, args):
         offset=Cam.OffsetCfg(
             pos=tuple(float(v) for v in args.cam_pos),
             rot=quat,
-            convention="world",
+            # _look_at_quat builds the rotation in the OpenGL camera frame
+            # (-Z forward, +Y up). Isaac Lab's "world" convention is +X
+            # forward / +Z up — a DIFFERENT axis — so tagging this "world"
+            # aimed the cam off into the sky (the all-gray/all-black render).
+            convention="opengl",
         ),
     )
     setattr(env_cfg.scene, "overview_cam", cam)
@@ -229,6 +233,40 @@ def main() -> int:
     teacher.requires_grad_(False)
 
     obs, _ = env.reset()
+
+    # ── Auto-aim the overview cam at where the robots ACTUALLY are ────────
+    # The hardcoded cam_pos/cam_look guess where the grid is; instead read the
+    # real per-env world origins (known only after reset) and frame their
+    # centroid. set_world_poses_from_view uses Isaac Lab's own camera
+    # convention, so it cannot get the -Z/+X axis mix-up wrong. This also
+    # adapts the distance to however large the env grid turns out to be.
+    if have_cam:
+        try:
+            origins = env.scene.env_origins  # (num_envs, 3) world positions
+            center = origins.mean(dim=0)
+            span_xy = (origins[:, :2].max(dim=0).values
+                       - origins[:, :2].min(dim=0).values)
+            radius = 0.5 * float(torch.linalg.norm(span_xy)) + 8.0  # +pad
+            dist = max(radius / math.tan(math.radians(35.0)), 14.0)
+            d = torch.tensor([-1.0, -1.0, 0.9], device=center.device)
+            d = d / torch.linalg.norm(d)
+            eye = center + d * dist
+            target = center + torch.tensor(
+                [0.0, 0.0, 0.3], device=center.device
+            )
+            print(f"[CAM] grid center="
+                  f"{[round(v, 2) for v in center.tolist()]} "
+                  f"radius={radius:.1f}m  eye="
+                  f"{[round(v, 2) for v in eye.tolist()]}", flush=True)
+            env.scene["overview_cam"].set_world_poses_from_view(
+                eye.unsqueeze(0), target.unsqueeze(0)
+            )
+            print("[CAM] aimed via set_world_poses_from_view (auto-framed)",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[CAM][WARN] auto-frame failed ({e}); using cfg pose "
+                  f"(--cam_pos/--cam_look)", flush=True)
+
     goals = falls = timeouts = episodes = 0
     frames: list[np.ndarray] = []
 
