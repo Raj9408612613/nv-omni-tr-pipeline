@@ -313,7 +313,7 @@ def main() -> int:
         f.write(report + "\n")
 
     if frames:
-        p = os.path.join(args.out_dir, "overview.mp4")
+        p = os.path.join(args.out_dir, "overview_teacher.mp4")
         iio.imwrite(p, np.stack(frames), fps=args.fps, codec="h264")
         print(f"[VIDEO] {p}  ({len(frames)} frames)", flush=True)
     else:
