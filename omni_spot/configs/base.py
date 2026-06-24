@@ -122,6 +122,33 @@ class TerrainCfg:
     stair_step_height_range: tuple[float, float] = (0.05, 0.23)
     stair_step_width: float = 0.30
     stair_platform_width: float = 3.0
+    # ── Parkour sub-terrains ("next level" beyond stairs) ────────────────
+    # Every proportion defaults to 0.0 -> the terrain is NOT added to the
+    # generator, so `spot` / `spot_hard` build the exact original 4-terrain
+    # mix. `spot_parkour` turns these on (and bumps `cols` so each active
+    # type gets a curriculum column). Difficulty (terrain row) scales each
+    # one's active dimension exactly like stair_step_height_range: row 0 =
+    # easiest, top row = the configured max.
+    parkour_platform_width: float = 2.0     # clear flat start patch (m)
+    # Scattered low boxes -> hurdles to step over / weave around.
+    discrete_obstacles_proportion: float = 0.0
+    discrete_obstacle_height_range: tuple[float, float] = (0.05, 0.18)
+    discrete_obstacle_width_range: tuple[float, float] = (0.25, 0.50)
+    discrete_obstacle_num: int = 10
+    # Grid of cells at random heights -> broken / uneven floor.
+    random_grid_proportion: float = 0.0
+    random_grid_width: float = 0.45
+    random_grid_height_range: tuple[float, float] = (0.02, 0.12)
+    # Thin raised rails -> narrow step-overs.
+    rails_proportion: float = 0.0
+    rail_thickness_range: tuple[float, float] = (0.05, 0.12)
+    rail_height_range: tuple[float, float] = (0.05, 0.16)
+    # Stepping stones over voids -> precise foot placement (HARD; off by
+    # default, reserved for a later spot_parkour_hard stage).
+    stepping_stones_proportion: float = 0.0
+    stepping_stone_height_max: float = 0.10
+    stepping_stone_width_range: tuple[float, float] = (0.30, 0.55)
+    stepping_stone_distance_range: tuple[float, float] = (0.05, 0.18)
 
 
 @dataclass
