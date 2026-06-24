@@ -173,6 +173,16 @@ def main() -> int:
     env = NavEnv(env_cfg, cfg)
     device = env.device
 
+    if have_cam:
+        # overview_cam is a SINGLE fixed world prim (no {ENV_REGEX_NS}), so
+        # it has exactly 1 instance — but InteractiveScene.reset(env_ids)
+        # indexes EVERY scene sensor's buffers with the full per-env env_ids
+        # (size num_envs), which is a CUDA OOB write for this cam's size-1
+        # buffers (the device-side assert on env.reset()). Rendering/update
+        # never takes external env_ids, so it's unaffected — only the
+        # per-env reset hook needs to become a no-op for this one sensor.
+        env.scene["overview_cam"].reset = lambda env_ids=None: None
+
     ckpt = load_checkpoint(args.ckpt, device)
     print(f"[INIT] ckpt phase={ckpt.get('phase')} robot={ckpt.get('robot')}",
           flush=True)
