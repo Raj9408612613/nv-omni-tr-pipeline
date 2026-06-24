@@ -48,8 +48,12 @@ _p.add_argument("--fps", type=int, default=25)
 _p.add_argument("--seed", type=int, default=0)
 # Camera placement (world meters). Defaults aim across the terrain grid from
 # high and to the side, matching the oblique overview screenshot.
-_p.add_argument("--cam_pos", type=float, nargs=3, default=[-12.0, -12.0, 9.0])
-_p.add_argument("--cam_look", type=float, nargs=3, default=[6.0, 6.0, 0.0])
+# The terrain is a 4x4 grid of 8 m patches centered on the origin (~±16 m),
+# and that extent is fixed regardless of --num_envs (extra envs share the 16
+# terrain cells), so this framing — pulled back to the -x/-y corner and
+# elevated, looking at the grid center — captures the whole wall of robots.
+_p.add_argument("--cam_pos", type=float, nargs=3, default=[-22.0, -22.0, 16.0])
+_p.add_argument("--cam_look", type=float, nargs=3, default=[0.0, 0.0, 0.0])
 AppLauncher.add_app_launcher_args(_p)
 args = _p.parse_args()
 args.enable_cameras = True  # student needs depth cams; overview also renders
@@ -149,6 +153,33 @@ def _attach_overview_cam(env_cfg, args):
     setattr(env_cfg.scene, "overview_cam", cam)
 
 
+def _attach_overview_light(env_cfg):
+    """Add scene lighting so the RGB overview isn't pure black.
+
+    The pipeline never spawns a light — depth cameras (geometric z-buffer),
+    scandot raycasts, and physics all need none — so an RGB render of the
+    scene is completely unlit (black). A dome gives uniform ambient fill from
+    all directions (guarantees everything is visible); a distant light adds a
+    key from above for shadows/3D definition. Both are single static world
+    prims (no {ENV_REGEX_NS}), so they spawn once and never enter the per-env
+    reset path that the overview cam had to be excused from.
+    """
+    try:
+        import isaaclab.sim as su
+        from isaaclab.assets import AssetBaseCfg
+    except ImportError:  # Isaac Lab 1.x fallback
+        import omni.isaac.lab.sim as su  # type: ignore
+        from omni.isaac.lab.assets import AssetBaseCfg  # type: ignore
+    env_cfg.scene.overview_dome = AssetBaseCfg(
+        prim_path="/World/overview_dome",
+        spawn=su.DomeLightCfg(intensity=1500.0, color=(0.9, 0.9, 0.9)),
+    )
+    env_cfg.scene.overview_sun = AssetBaseCfg(
+        prim_path="/World/overview_sun",
+        spawn=su.DistantLightCfg(intensity=2000.0, color=(1.0, 1.0, 0.95)),
+    )
+
+
 def main() -> int:
     torch.manual_seed(args.seed)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -161,6 +192,11 @@ def main() -> int:
 
     env_cfg = build_env_cfg(cfg, args.num_envs)
     env_cfg.seed = args.seed
+    try:
+        _attach_overview_light(env_cfg)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] light attach failed ({e}); RGB overview may be dark",
+              flush=True)
     try:
         _attach_overview_cam(env_cfg, args)
         have_cam = True
