@@ -106,9 +106,11 @@ echo "    active python: $(python --version)"
 echo ">>> Stage 2: PyTorch ($TORCH_CUDA) + build tooling"
 pip install "setuptools<75.0.0"
 
+if python -c "import torch" 2>/dev/null; then
+    echo "    torch already installed"
+else
     pip install torch torchvision \
         --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
-        
 fi
 python - <<'PY'
 import torch
