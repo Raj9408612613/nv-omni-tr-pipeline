@@ -122,11 +122,11 @@ ROUGH_AMP = 0.12      # rough-terrain max bump above the plinth (m)
 LANE_GAP = 2.0        # clear gap between the two lanes (m)
 
 # Colors (diffuse) per terrain kind — keeps the overview legible.
-COL_START = (0.35, 0.45, 0.40)
-COL_PLAIN = (0.42, 0.42, 0.48)
-COL_ROUGH = (0.55, 0.45, 0.30)
-COL_UP = (0.30, 0.42, 0.62)
-COL_DOWN = (0.50, 0.32, 0.55)
+COL_START = (0.25, 0.75, 0.45)   # green run-up pad
+COL_PLAIN = (0.60, 0.60, 0.68)   # light grey
+COL_ROUGH = (0.85, 0.55, 0.20)   # orange
+COL_UP = (0.20, 0.55, 0.95)      # blue pyramid
+COL_DOWN = (0.80, 0.30, 0.80)    # magenta pit
 
 COURSE_SEGMENTS = {
     0: ["plain", "rough", "stairs_up", "plain"],
@@ -352,7 +352,11 @@ def _attach_overview_cam(env_cfg, cam_pos, cam_look):
             clipping_range=(0.1, 400.0),
         ),
         offset=Cam.OffsetCfg(
-            pos=tuple(float(v) for v in cam_pos), rot=quat, convention="world",
+            pos=tuple(float(v) for v in cam_pos), rot=quat,
+            # _look_at_quat builds the rotation in the OpenGL camera frame
+            # (-Z forward, +Y up). Tagging it "world" (+X forward / +Z up)
+            # aims the cam off into the sky -> the empty grey/black render.
+            convention="opengl",
         ),
     )
     setattr(env_cfg.scene, "overview_cam", cam)
@@ -423,10 +427,15 @@ def main() -> int:
         setattr(env_cfg.scene, f"goal_{k}",
                 _goal_sphere_cfg(su, AssetBaseCfg, f"goal_{k}", pos, radius))
     # A bare ground plane carries no lighting; without a light the cuboids and
-    # robots render black. Add a dome light so the overview video is legible.
+    # robots render black. Dome gives uniform ambient fill (everything visible);
+    # the distant "sun" adds a key from above for shading/3D relief on stairs.
     env_cfg.scene.dome_light = AssetBaseCfg(
-        prim_path="/World/Light",
-        spawn=su.DomeLightCfg(intensity=1200.0, color=(0.9, 0.9, 0.95)),
+        prim_path="/World/DomeLight",
+        spawn=su.DomeLightCfg(intensity=1500.0, color=(0.9, 0.9, 0.95)),
+    )
+    env_cfg.scene.sun_light = AssetBaseCfg(
+        prim_path="/World/SunLight",
+        spawn=su.DistantLightCfg(intensity=2000.0, color=(1.0, 1.0, 0.95)),
     )
 
     # Auto-frame the overview camera over the whole arena if not overridden.
@@ -482,6 +491,38 @@ def main() -> int:
     obs, _ = env.reset()
     prev_done = torch.ones(args.num_envs, dtype=torch.bool, device=device)
     course_id = env._course_id  # (B,) on device
+
+    # Sanity: where did the robots actually land? (course coords, not the
+    # env grid). If this prints the start pads (x small, y ~ +/-2.5) the
+    # placement is correct and any blank video is purely a camera issue.
+    rp = env.scene["robot"].data.root_pos_w
+    print(f"[DBG] robot xyz: x[{rp[:,0].min():.1f},{rp[:,0].max():.1f}] "
+          f"y[{rp[:,1].min():.1f},{rp[:,1].max():.1f}] "
+          f"z[{rp[:,2].min():.1f},{rp[:,2].max():.1f}]", flush=True)
+
+    # Robustly aim the overview cam at the course strip using Isaac Lab's own
+    # view helper (it sets the rotation internally, so the OpenGL/world axis
+    # mix-up is impossible). Frame the centroid of where the robots are.
+    if have_cam:
+        try:
+            ctr = rp.mean(dim=0)
+            ctr[2] = 0.4
+            span = (rp[:, :2].max(dim=0).values
+                    - rp[:, :2].min(dim=0).values)
+            radius = 0.5 * float(torch.linalg.norm(span)) + 6.0
+            dist = max(radius / math.tan(math.radians(35.0)), 14.0)
+            d = torch.tensor([-0.35, -1.0, 0.85], device=ctr.device)
+            d = d / torch.linalg.norm(d)
+            eye = ctr + d * dist
+            print(f"[CAM] auto-frame center="
+                  f"{[round(v, 1) for v in ctr.tolist()]} radius={radius:.1f} "
+                  f"eye={[round(v, 1) for v in eye.tolist()]}", flush=True)
+            env.scene["overview_cam"].set_world_poses_from_view(
+                eye.unsqueeze(0), ctr.unsqueeze(0)
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[CAM][WARN] auto-frame failed ({e}); using cfg pose "
+                  f"(tune --cam_pos/--cam_look)", flush=True)
 
     # Per-course tallies.
     goals = torch.zeros(2, device=device)
