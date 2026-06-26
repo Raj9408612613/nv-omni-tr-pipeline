@@ -594,8 +594,10 @@ class CourseNavEnv(NavEnv):
         self._lookahead = float(lookahead)
         self._final_tol = 0.6  # m, distance to the true course end = success
         self._course_ready = True
-        # Re-place every robot onto its course now that the layout is known.
-        self._reset_idx(torch.arange(self.num_envs, device=dev))
+        # NOTE: do NOT call _reset_idx here. The course placement is applied by
+        # main()'s env.reset(), which runs after this. Forcing a manual reset
+        # (and its scene.reset -> camera-sensor reset) before the normal first
+        # reset trips a CUDA device-side assert in the GPU sensor/fabric path.
 
     # ── Moving carrot waypoint (keeps the goal input in-distribution) ────
     def _update_carrot(self):
