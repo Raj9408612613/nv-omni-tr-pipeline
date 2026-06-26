@@ -441,6 +441,19 @@ def main() -> int:
     device = env.device
     env.set_course_layout(per_env, lookahead=args.lookahead)
 
+    # The overview cam is a SINGLE global instance (/World/overview_cam, one
+    # prim -> size-1 buffers). InteractiveScene.reset() resets every sensor
+    # with env_ids = arange(num_envs); indexing a size-1 GPU buffer with
+    # [0..num_envs-1] triggers a CUDA device-side assert. Neutralize it by
+    # resetting its one instance regardless of the per-env indices passed in.
+    if have_cam:
+        try:
+            _ov = env.scene["overview_cam"]
+            _ov_reset = _ov.reset
+            _ov.reset = lambda env_ids=None, _r=_ov_reset: _r(None)
+        except (KeyError, AttributeError):
+            pass
+
     # ── Load student at its TRAINED resolution ───────────────────────────
     net_cfg = copy.deepcopy(cfg)
     net_cfg.camera.height, net_cfg.camera.width = net_h, net_w
