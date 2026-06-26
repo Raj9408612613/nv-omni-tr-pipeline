@@ -422,12 +422,23 @@ def main() -> int:
     for k, (pos, radius) in enumerate(markers):
         setattr(env_cfg.scene, f"goal_{k}",
                 _goal_sphere_cfg(su, AssetBaseCfg, f"goal_{k}", pos, radius))
+    # A bare ground plane carries no lighting; without a light the cuboids and
+    # robots render black. Add a dome light so the overview video is legible.
+    env_cfg.scene.dome_light = AssetBaseCfg(
+        prim_path="/World/Light",
+        spawn=su.DomeLightCfg(intensity=1200.0, color=(0.9, 0.9, 0.95)),
+    )
 
     # Auto-frame the overview camera over the whole arena if not overridden.
+    # The arena is a long strip along +X; sit back along -Y far enough to fit
+    # its length in the 70-deg FOV, slightly elevated for an oblique view.
     cx = meta["total_len"] / 2.0
-    cam_pos = args.cam_pos or [cx, -(meta["total_len"] * 0.72 + 4.0),
-                               meta["total_len"] * 0.55 + 3.0]
-    cam_look = args.cam_look or [cx, 0.0, 0.4]
+    half = meta["total_len"] / 2.0
+    y_back = half / math.tan(math.radians(33.0)) + meta["y_extent"] + 2.0
+    cam_pos = args.cam_pos or [cx, -y_back, 0.5 * half + 3.0]
+    cam_look = args.cam_look or [cx, 0.0, 0.5]
+    print(f"[CAM] overview pos={[round(v, 1) for v in cam_pos]} "
+          f"look={[round(v, 1) for v in cam_look]}", flush=True)
     try:
         _attach_overview_cam(env_cfg, cam_pos, cam_look)
         have_cam = True
@@ -678,8 +689,11 @@ class CourseNavEnv(NavEnv):
         self._last_proprio[env_ids] = 0.0
         self._history.reset_idx(env_ids)
         self._just_reset[env_ids] = True
-        self._fallen[env_ids] = False
-        self._at_goal[env_ids] = False
+        # NOTE: do NOT clear self._fallen / self._at_goal here. The env
+        # auto-resets done envs inside step() BEFORE step() returns, so the
+        # eval loop reads these flags post-reset — clearing them would make
+        # every goal/fall invisible (episodes climb while goals=falls=0).
+        # _get_dones() overwrites both for all envs on the next step anyway.
 
         # ── Domain randomization (only if enabled) ──────────────────────────
         self._apply_dr(env_ids)
