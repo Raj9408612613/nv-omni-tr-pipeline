@@ -395,27 +395,59 @@ if HAS_ISAAC:
                 except Exception as e:  # noqa: BLE001
                     self._warn_once("payload", f"payload/CoM DR failed: {e}")
 
-            if dr.randomize_motor_strength:
+            if dr.randomize_motor_strength or dr.randomize_leg_failure:
                 try:
-                    scale = torch.empty(n, device=self.device).uniform_(
-                        *dr.motor_strength_range
-                    )
                     J = x.action_dim
-                    kp = (x.robot.actuator_stiffness * scale).unsqueeze(
-                        -1
-                    ).expand(n, J)
-                    kv = (x.robot.actuator_damping * scale).unsqueeze(
-                        -1
-                    ).expand(n, J)
+                    if dr.randomize_motor_strength:
+                        scale = torch.empty(n, device=self.device).uniform_(
+                            *dr.motor_strength_range
+                        )
+                    else:
+                        scale = torch.ones(n, device=self.device)
+                    # Per-(env, joint) kp/kv scale; uniform per env to start.
+                    scale_mat = scale.unsqueeze(-1).expand(n, J).clone()
+                    # One-leg failure: weaken every joint of ONE randomly chosen
+                    # leg, for the subset of envs that "fail" this episode.
+                    # Assumes joints are grouped by leg in policy order (spot:
+                    # fl_*, fr_*, hl_*, hr_*), so leg L = joints [L*jpl:(L+1)*jpl].
+                    if dr.randomize_leg_failure and dr.leg_failure_prob > 0.0:
+                        num_legs = max(1, x.robot.num_feet)
+                        jpl = J // num_legs
+                        if jpl >= 1:
+                            fail = (torch.rand(n, device=self.device)
+                                    < dr.leg_failure_prob)
+                            leg = torch.randint(
+                                0, num_legs, (n,), device=self.device
+                            )
+                            joint_leg = (
+                                torch.arange(J, device=self.device) // jpl
+                            ).clamp(max=num_legs - 1)
+                            fail_joint = (
+                                fail.unsqueeze(1)
+                                & (joint_leg.unsqueeze(0) == leg.unsqueeze(1))
+                            )
+                            scale_mat = torch.where(
+                                fail_joint,
+                                torch.full_like(
+                                    scale_mat, float(dr.leg_failure_strength)
+                                ),
+                                scale_mat,
+                            )
+                    kp = x.robot.actuator_stiffness * scale_mat
+                    kv = x.robot.actuator_damping * scale_mat
                     robot.write_joint_stiffness_to_sim(
                         kp, joint_ids=self._joint_ids, env_ids=env_ids
                     )
                     robot.write_joint_damping_to_sim(
                         kv, joint_ids=self._joint_ids, env_ids=env_ids
                     )
+                    # Privileged obs tracks the overall motor scale only — the
+                    # leg failure is hidden on purpose (must be inferred).
                     self._motor[env_ids] = scale
                 except Exception as e:  # noqa: BLE001
-                    self._warn_once("motor", f"motor-strength DR failed: {e}")
+                    self._warn_once(
+                        "motor", f"motor/leg-failure DR failed: {e}"
+                    )
 
         def _apply_pushes(self):
             dr = self._x.dr
@@ -491,7 +523,13 @@ if HAS_ISAAC:
                 collided = torch.zeros_like(fallen)
             self._fallen = fallen | collided  # demotes via the curriculum
             self._at_goal = at_goal
-            terminated = fallen | at_goal | collided
+            # "Rebalance instead of terminate": when terminate_on_fall is off
+            # (Round-1 robustness), a fall does NOT end the episode — the robot
+            # gets the rest of the episode to get back up. fallen is still
+            # tracked above for the alive gating + curriculum demote signal.
+            terminated = at_goal | collided
+            if x.reward.terminate_on_fall:
+                terminated = terminated | fallen
             truncated = timeout & ~terminated
             return terminated, truncated
 
@@ -531,6 +569,7 @@ if HAS_ISAAC:
                 has_collision=min_obs_dist < x.obstacles.collision_dist,
                 prev_dist_goal=self._prev_dist,
                 base_height=self._base_height,
+                root_ang_vel=robot.data.root_ang_vel_b,
             )
             self._prev_dist = new_dist
             self._prev_ctrl = self._ctrl.clone()

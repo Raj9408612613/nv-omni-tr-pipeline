@@ -77,6 +77,15 @@ class RewardWeightsCfg:
     # Termination thresholds (check_termination)
     fall_height: float = 0.2        # m over terrain
     fall_tilt_rad: float = 1.0472   # pi/3
+    # ── Recovery / robustness (Round-1 "rebalance instead of terminate") ──
+    # terminate_on_fall=False -> a fall does NOT end the episode; the robot
+    # must get back up (full get-up). recover_w rewards uprightness (the
+    # get-up gradient); ang_vel_w penalizes the base angular velocity that
+    # precedes a tip-over. All default to the original behavior (terminate on
+    # fall, no extra shaping), so existing robots are byte-for-byte unchanged.
+    terminate_on_fall: bool = True
+    recover_w: float = 0.0          # reward = recover_w * cos(tilt): + upright
+    ang_vel_w: float = 0.0          # penalty on base angular velocity (<= 0)
 
 
 @dataclass
@@ -260,6 +269,15 @@ class DRCfg:
     push_robots: bool = True
     push_interval_s: float = 8.0
     push_max_vel_xy: float = 0.5                             # m/s impulse
+    # ── Actuator leg failure (Round-2 "one leg disable" robustness) ──────
+    # Per episode, with prob leg_failure_prob, ONE leg's joints have their
+    # kp/kv scaled to leg_failure_strength (~0 = limp), forcing the policy to
+    # walk / recover on a degraded leg. Disabled by default. Deliberately NOT
+    # exposed in the privileged obs: the policy must infer the failure from
+    # proprioception, so the skill survives distillation to the student.
+    randomize_leg_failure: bool = False
+    leg_failure_prob: float = 0.0
+    leg_failure_strength: float = 0.0    # kp/kv scale of the disabled leg
 
 
 # ════════════════════════════════════════════════════════════════════════════
