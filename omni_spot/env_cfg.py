@@ -151,44 +151,50 @@ if HAS_ISAAC:
                     ),
                 ),
             )
+        terrain_gen = TerrainGeneratorCfg(
+            seed=t.seed,
+            size=(t.patch_size, t.patch_size),
+            border_width=t.border_width,
+            num_rows=t.rows,
+            num_cols=t.cols,
+            horizontal_scale=t.horizontal_scale,
+            vertical_scale=t.vertical_scale,
+            slope_threshold=t.slope_threshold,
+            curriculum=True,
+            sub_terrains={
+                "flat": HfRandomUniformTerrainCfg(
+                    proportion=t.flat_proportion,
+                    noise_range=t.flat_noise_range,
+                    noise_step=t.flat_noise_step,
+                ),
+                "rough": HfRandomUniformTerrainCfg(
+                    proportion=t.rough_proportion,
+                    noise_range=t.rough_noise_range,
+                    noise_step=t.rough_noise_step,
+                ),
+                "stairs_up": HfPyramidStairsTerrainCfg(
+                    proportion=t.stairs_up_proportion,
+                    step_height_range=t.stair_step_height_range,
+                    step_width=t.stair_step_width,
+                    platform_width=t.stair_platform_width,
+                ),
+                "stairs_down": HfInvertedPyramidStairsTerrainCfg(
+                    proportion=t.stairs_down_proportion,
+                    step_height_range=t.stair_step_height_range,
+                    step_width=t.stair_step_width,
+                    platform_width=t.stair_platform_width,
+                ),
+            },
+        )
+        # Optional per-patch coloring (viz only). Guarded: older Isaac Lab
+        # TerrainGeneratorCfg has no color_scheme field, and "none" is a no-op.
+        cs = getattr(t, "color_scheme", "none")
+        if cs and cs != "none" and hasattr(terrain_gen, "color_scheme"):
+            terrain_gen.color_scheme = cs
         return TerrainImporterCfg(
             prim_path="/World/ground",
             terrain_type="generator",
-            terrain_generator=TerrainGeneratorCfg(
-                seed=t.seed,
-                size=(t.patch_size, t.patch_size),
-                border_width=t.border_width,
-                num_rows=t.rows,
-                num_cols=t.cols,
-                horizontal_scale=t.horizontal_scale,
-                vertical_scale=t.vertical_scale,
-                slope_threshold=t.slope_threshold,
-                curriculum=True,
-                sub_terrains={
-                    "flat": HfRandomUniformTerrainCfg(
-                        proportion=t.flat_proportion,
-                        noise_range=t.flat_noise_range,
-                        noise_step=t.flat_noise_step,
-                    ),
-                    "rough": HfRandomUniformTerrainCfg(
-                        proportion=t.rough_proportion,
-                        noise_range=t.rough_noise_range,
-                        noise_step=t.rough_noise_step,
-                    ),
-                    "stairs_up": HfPyramidStairsTerrainCfg(
-                        proportion=t.stairs_up_proportion,
-                        step_height_range=t.stair_step_height_range,
-                        step_width=t.stair_step_width,
-                        platform_width=t.stair_platform_width,
-                    ),
-                    "stairs_down": HfInvertedPyramidStairsTerrainCfg(
-                        proportion=t.stairs_down_proportion,
-                        step_height_range=t.stair_step_height_range,
-                        step_width=t.stair_step_width,
-                        platform_width=t.stair_platform_width,
-                    ),
-                },
-            ),
+            terrain_generator=terrain_gen,
             collision_group=-1,
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
