@@ -149,6 +149,11 @@ class TerrainCfg:
     stepping_stone_height_max: float = 0.10
     stepping_stone_width_range: tuple[float, float] = (0.30, 0.55)
     stepping_stone_distance_range: tuple[float, float] = (0.05, 0.18)
+    # Visual coloring of the generated terrain mesh. "none" (default) keeps the
+    # raw grey heightfield used during training; "random" gives each sub-terrain
+    # patch a distinct color, "height" tints by elevation. Only consumed when
+    # the installed TerrainGeneratorCfg exposes a color_scheme field.
+    color_scheme: str = "none"
 
 
 @dataclass

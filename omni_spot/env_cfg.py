@@ -270,21 +270,27 @@ if HAS_ISAAC:
                 flush=True,
             )
 
+        terrain_gen = TerrainGeneratorCfg(
+            seed=t.seed,
+            size=(t.patch_size, t.patch_size),
+            border_width=t.border_width,
+            num_rows=t.rows,
+            num_cols=t.cols,
+            horizontal_scale=t.horizontal_scale,
+            vertical_scale=t.vertical_scale,
+            slope_threshold=t.slope_threshold,
+            curriculum=True,
+            sub_terrains=sub_terrains,
+        )
+        # Optional per-patch coloring (viz only). Guarded: older Isaac Lab
+        # TerrainGeneratorCfg has no color_scheme field, and "none" is a no-op.
+        cs = getattr(t, "color_scheme", "none")
+        if cs and cs != "none" and hasattr(terrain_gen, "color_scheme"):
+            terrain_gen.color_scheme = cs
         return TerrainImporterCfg(
             prim_path="/World/ground",
             terrain_type="generator",
-            terrain_generator=TerrainGeneratorCfg(
-                seed=t.seed,
-                size=(t.patch_size, t.patch_size),
-                border_width=t.border_width,
-                num_rows=t.rows,
-                num_cols=t.cols,
-                horizontal_scale=t.horizontal_scale,
-                vertical_scale=t.vertical_scale,
-                slope_threshold=t.slope_threshold,
-                curriculum=True,
-                sub_terrains=sub_terrains,
-            ),
+            terrain_generator=terrain_gen,
             collision_group=-1,
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",

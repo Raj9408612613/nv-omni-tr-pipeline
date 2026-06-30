@@ -145,7 +145,36 @@ echo "    active python: $(python --version)"
 # =============================================================================
 echo ">>> Stage 2: PyTorch ($TORCH_CUDA, need arch ${TORCH_REQUIRED_ARCH:-any}) + build tooling"
 pip install "setuptools<75.0.0"
-ensure_torch
+# (Re)install torch if it is missing OR if the installed build lacks compiled
+# kernels for THIS GPU's compute arch. The latter is the classic Blackwell
+# trap: `pip install torch` (default index) gives a CUDA 12.6 build whose
+# kernels stop at sm_90, so on an sm_120 card it imports fine but dies at
+# runtime with "no kernel image is available for execution on the device".
+# We compare the device capability against torch's compiled arch list — both
+# are static/property queries that do NOT launch a kernel, so the check is
+# safe even on a mismatched build. A plain `import torch` check is NOT enough
+# (pip matches on version, not CUDA build, so a wrong-arch torch slips by).
+torch_arch_ok() {
+    python - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch
+    cap = torch.cuda.get_device_capability()       # e.g. (12, 0) on Blackwell
+except Exception:
+    sys.exit(1)
+arch = f"sm_{cap[0]}{cap[1]}"
+sys.exit(0 if arch in torch.cuda.get_arch_list() else 1)
+PY
+}
+if torch_arch_ok; then
+    echo "    torch present and supports this GPU's compute arch"
+else
+    echo "    torch missing or wrong CUDA build for this GPU — installing $TORCH_CUDA ..."
+    pip install --force-reinstall --no-cache-dir torch torchvision \
+        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
+    # If $TORCH_CUDA stable still lacks your arch (very new GPU), switch to the
+    # matching nightly index, e.g. .../whl/nightly/cu128, and re-run.
+fi
 python - <<'PY'
 import torch
 ok = torch.cuda.is_available()
