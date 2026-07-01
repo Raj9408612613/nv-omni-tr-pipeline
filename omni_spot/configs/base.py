@@ -77,6 +77,15 @@ class RewardWeightsCfg:
     # Termination thresholds (check_termination)
     fall_height: float = 0.2        # m over terrain
     fall_tilt_rad: float = 1.0472   # pi/3
+    # ── Recovery / robustness (Round-1 "rebalance instead of terminate") ──
+    # terminate_on_fall=False -> a fall does NOT end the episode; the robot
+    # must get back up (full get-up). recover_w rewards uprightness (the
+    # get-up gradient); ang_vel_w penalizes the base angular velocity that
+    # precedes a tip-over. All default to the original behavior (terminate on
+    # fall, no extra shaping), so existing robots are byte-for-byte unchanged.
+    terminate_on_fall: bool = True
+    recover_w: float = 0.0          # reward = recover_w * cos(tilt): + upright
+    ang_vel_w: float = 0.0          # penalty on base angular velocity (<= 0)
 
 
 @dataclass
@@ -122,6 +131,38 @@ class TerrainCfg:
     stair_step_height_range: tuple[float, float] = (0.05, 0.23)
     stair_step_width: float = 0.30
     stair_platform_width: float = 3.0
+    # ── Parkour sub-terrains ("next level" beyond stairs) ────────────────
+    # Every proportion defaults to 0.0 -> the terrain is NOT added to the
+    # generator, so `spot` / `spot_hard` build the exact original 4-terrain
+    # mix. `spot_parkour` turns these on (and bumps `cols` so each active
+    # type gets a curriculum column). Difficulty (terrain row) scales each
+    # one's active dimension exactly like stair_step_height_range: row 0 =
+    # easiest, top row = the configured max.
+    parkour_platform_width: float = 2.0     # clear flat start patch (m)
+    # Scattered low boxes -> hurdles to step over / weave around.
+    discrete_obstacles_proportion: float = 0.0
+    discrete_obstacle_height_range: tuple[float, float] = (0.05, 0.18)
+    discrete_obstacle_width_range: tuple[float, float] = (0.25, 0.50)
+    discrete_obstacle_num: int = 10
+    # Grid of cells at random heights -> broken / uneven floor.
+    random_grid_proportion: float = 0.0
+    random_grid_width: float = 0.45
+    random_grid_height_range: tuple[float, float] = (0.02, 0.12)
+    # Thin raised rails -> narrow step-overs.
+    rails_proportion: float = 0.0
+    rail_thickness_range: tuple[float, float] = (0.05, 0.12)
+    rail_height_range: tuple[float, float] = (0.05, 0.16)
+    # Stepping stones over voids -> precise foot placement (HARD; off by
+    # default, reserved for a later spot_parkour_hard stage).
+    stepping_stones_proportion: float = 0.0
+    stepping_stone_height_max: float = 0.10
+    stepping_stone_width_range: tuple[float, float] = (0.30, 0.55)
+    stepping_stone_distance_range: tuple[float, float] = (0.05, 0.18)
+    # Visual coloring of the generated terrain mesh. "none" (default) keeps the
+    # raw grey heightfield used during training; "random" gives each sub-terrain
+    # patch a distinct color, "height" tints by elevation. Only consumed when
+    # the installed TerrainGeneratorCfg exposes a color_scheme field.
+    color_scheme: str = "none"
 
 
 @dataclass
@@ -228,6 +269,15 @@ class DRCfg:
     push_robots: bool = True
     push_interval_s: float = 8.0
     push_max_vel_xy: float = 0.5                             # m/s impulse
+    # ── Actuator leg failure (Round-2 "one leg disable" robustness) ──────
+    # Per episode, with prob leg_failure_prob, ONE leg's joints have their
+    # kp/kv scaled to leg_failure_strength (~0 = limp), forcing the policy to
+    # walk / recover on a degraded leg. Disabled by default. Deliberately NOT
+    # exposed in the privileged obs: the policy must infer the failure from
+    # proprioception, so the skill survives distillation to the student.
+    randomize_leg_failure: bool = False
+    leg_failure_prob: float = 0.0
+    leg_failure_strength: float = 0.0    # kp/kv scale of the disabled leg
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -327,6 +377,46 @@ class StudentTrainCfg:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Population-Based Training (Phase-1 teacher search)
+# ════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PBTCfg:
+    """Per-robot PBT search space + schedule.
+
+    Lives on ExperimentCfg so each embodiment declares its OWN knob ranges —
+    reward magnitudes differ across robots, so a search space tuned for Spot
+    must not be hardcoded into the trainer. train_pbt CLI flags override these
+    when provided; otherwise these per-robot values are the source of truth.
+
+    The 4 reward knobs are tiled per-env; the 3 PPO knobs are per-member. Ranges
+    are (lo, hi) and are also the clamp bounds used after each perturbation.
+    """
+    # Population scale (VRAM-gated; see plan Phase 5).
+    pop_size: int = 24
+    envs_per_member: int = 2048
+    # Schedule.
+    pbt_interval: int = 50          # evolve every N updates
+    pbt_warmup: int = 100           # no PBT before this update
+    # Weight-free fitness = success_rate - fitness_dist_weight * mean_final_dist.
+    fitness_dist_weight: float = 0.1
+    # Reward-knob ranges (must stay within what reward.compute_reward expects).
+    alive_bonus_range: tuple[float, float] = (0.0, 0.2)
+    progress_w_range: tuple[float, float] = (10.0, 100.0)
+    vel_track_w_range: tuple[float, float] = (0.5, 3.0)
+    goal_bonus_range: tuple[float, float] = (10.0, 50.0)
+    # PPO-knob ranges.
+    clip_eps_range: tuple[float, float] = (0.1, 0.3)
+    ent_coef_range: tuple[float, float] = (0.0, 0.02)
+    lr_range: tuple[float, float] = (1e-5, 1e-3)
+    # Exploration: each perturbed knob is multiplied by a random factor, clamped.
+    perturb_factors: tuple[float, ...] = (0.8, 1.2)
+    # Initial ent_coef floor: multiplicative perturbation cannot revive a knob
+    # that started at exactly 0, so members are seeded strictly positive.
+    ent_coef_min_init: float = 1e-3
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Aggregate
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -346,6 +436,7 @@ class ExperimentCfg:
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     teacher: TeacherTrainCfg = field(default_factory=TeacherTrainCfg)
     student: StudentTrainCfg = field(default_factory=StudentTrainCfg)
+    pbt: PBTCfg = field(default_factory=PBTCfg)
 
     # ── Derived dimensions (the only place they are defined) ─────────
     @property

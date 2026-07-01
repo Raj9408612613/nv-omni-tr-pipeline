@@ -34,6 +34,11 @@ set -euo pipefail
 ENV_NAME="isaac"
 PY_VERSION="3.11"
 TORCH_CUDA="cu128"                 # Blackwell / driver 580. Adjust if needed.
+TORCH_VERSION="2.7.0"              # MUST match Isaac Lab's pin. The cu128 build
+                                   # of this version is what carries sm_120
+                                   # (Blackwell) kernels; the default-index
+                                   # cu126 build of the SAME version does not.
+TORCHVISION_VERSION="0.22.0"       # pairs with torch 2.7.0
 NVIDIA_DRIVER="nvidia-driver-580-open"
 SWAP_SIZE="32G"
 CONDA_DIR="$HOME/miniconda3"
@@ -106,10 +111,46 @@ echo "    active python: $(python --version)"
 echo ">>> Stage 2: PyTorch ($TORCH_CUDA) + build tooling"
 pip install "setuptools<75.0.0"
 
-    pip install torch torchvision \
-        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
-        
-fi
+# (Re)install torch if it is missing OR if the installed build lacks compiled
+# kernels for THIS GPU's compute arch. The latter is the classic Blackwell
+# trap: `pip install torch` (default index) gives a CUDA 12.6 build whose
+# kernels stop at sm_90, so on an sm_120 card it imports fine but dies at
+# runtime with "no kernel image is available for execution on the device".
+# We compare the device capability against torch's compiled arch list — both
+# are static/property queries that do NOT launch a kernel, so the check is
+# safe even on a mismatched build. A plain `import torch` check is NOT enough
+# (pip matches on version, not CUDA build, so a wrong-arch torch slips by).
+torch_arch_ok() {
+    python - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch
+    cap = torch.cuda.get_device_capability()       # e.g. (12, 0) on Blackwell
+except Exception:
+    sys.exit(1)
+arch = f"sm_{cap[0]}{cap[1]}"
+sys.exit(0 if arch in torch.cuda.get_arch_list() else 1)
+PY
+}
+
+# Install the pinned, GPU-arch-correct torch ONLY when the current install is
+# missing or built for the wrong arch. Idempotent: a no-op once the right wheel
+# is in place, so re-running the script does NOT redownload/reinstall torch
+# every time. No --no-cache-dir, so the rare reinstall reuses the pip cache
+# instead of pulling the ~3 GB wheel again.
+ensure_torch() {
+    if torch_arch_ok; then
+        echo "    torch OK — present and has kernels for this GPU's compute arch"
+    else
+        echo "    torch missing or wrong CUDA build — installing torch==$TORCH_VERSION ($TORCH_CUDA) ..."
+        pip install --force-reinstall \
+            "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+            --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
+        # If $TORCH_CUDA stable still lacks your arch (very new GPU), switch to
+        # the matching nightly index, e.g. .../whl/nightly/cu128, and re-run.
+    fi
+}
+ensure_torch
 python - <<'PY'
 import torch
 ok = torch.cuda.is_available()
@@ -163,6 +204,15 @@ else
     popd >/dev/null
 fi
 pip install tensorboard "imageio[ffmpeg]" h5py
+
+# Isaac Sim / Isaac Lab declare their own torch dependency and, when they (re)
+# install, can silently swap our cu128 wheel for a default-index cu126 build
+# that has NO sm_120 kernels — the exact "no kernel image" trap. Re-assert the
+# correct build now, AFTER those installs, so torch has the last word. This is
+# why earlier runs seemed to "reinstall every time": Stage 2 fixed torch, then
+# Stage 4 clobbered it. Idempotent once stable.
+echo ">>> Re-verifying torch CUDA arch after Isaac install"
+ensure_torch
 
 echo "    import check:"
 python -c "import isaacsim; print('      isaacsim OK')" || echo "      isaacsim FAILED"

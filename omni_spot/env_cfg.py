@@ -25,6 +25,7 @@ from .configs.base import ExperimentCfg
 # (train.py launches AppLauncher before importing this module).
 HAS_ISAAC = False
 HAS_TERRAIN = False
+HAS_PARKOUR_TERRAIN = False
 _ISAAC_IMPORT_ERROR: str | None = None
 
 try:
@@ -54,10 +55,28 @@ try:
             TerrainImporterCfg,
         )
         HAS_TERRAIN = True
+        # Parkour terrains are guarded SEPARATELY: a build that lacks one of
+        # these must still keep the core flat/rough/stairs terrain working.
+        try:
+            from isaaclab.terrains import (
+                HfDiscreteObstaclesTerrainCfg,
+                HfSteppingStonesTerrainCfg,
+                MeshRailsTerrainCfg,
+                MeshRandomGridTerrainCfg,
+            )
+            HAS_PARKOUR_TERRAIN = True
+        except ImportError:
+            HAS_PARKOUR_TERRAIN = False
     except ImportError:
         HAS_TERRAIN = False
+        HAS_PARKOUR_TERRAIN = False
     HAS_ISAAC = True
-except ImportError:
+except ImportError as _e2x:
+    # Capture the REAL Isaac Lab 2.x failure — otherwise the message below only
+    # reports the 1.x fallback ("No module named 'omni.isaac.lab'"), which
+    # hides which isaaclab.* import actually broke (e.g. a renamed symbol in a
+    # newer IsaacLab checkout).
+    _err_2x = f"{type(_e2x).__name__}: {_e2x}"
     try:
         # Isaac Lab 1.x (omniverse extension)
         import omni.isaac.lab.sim as sim_utils
@@ -89,11 +108,26 @@ except ImportError:
                 TerrainImporterCfg,
             )
             HAS_TERRAIN = True
+            try:
+                from omni.isaac.lab.terrains import (
+                    HfDiscreteObstaclesTerrainCfg,
+                    HfSteppingStonesTerrainCfg,
+                    MeshRailsTerrainCfg,
+                    MeshRandomGridTerrainCfg,
+                )
+                HAS_PARKOUR_TERRAIN = True
+            except ImportError:
+                HAS_PARKOUR_TERRAIN = False
         except ImportError:
             HAS_TERRAIN = False
+            HAS_PARKOUR_TERRAIN = False
         HAS_ISAAC = True
-    except ImportError as _e:
-        _ISAAC_IMPORT_ERROR = str(_e)
+    except ImportError as _e1x:
+        _ISAAC_IMPORT_ERROR = (
+            f"isaaclab (2.x) import failed -> {_err_2x};  "
+            f"omni.isaac.lab (1.x) fallback -> "
+            f"{type(_e1x).__name__}: {_e1x}"
+        )
 
 
 if HAS_ISAAC:
@@ -151,44 +185,112 @@ if HAS_ISAAC:
                     ),
                 ),
             )
+
+        # Curriculum sub-terrains. The base mix (flat/rough/stairs) is always
+        # present; parkour tiles are appended only when this Isaac Lab build
+        # exposes the classes AND the active config gives them a non-zero
+        # proportion — so spot / spot_hard reproduce the original 4-terrain
+        # generator byte-for-byte. Difficulty (terrain row) scales each tile's
+        # active dimension exactly like stair_step_height_range.
+        sub_terrains = {
+            "flat": HfRandomUniformTerrainCfg(
+                proportion=t.flat_proportion,
+                noise_range=t.flat_noise_range,
+                noise_step=t.flat_noise_step,
+            ),
+            "rough": HfRandomUniformTerrainCfg(
+                proportion=t.rough_proportion,
+                noise_range=t.rough_noise_range,
+                noise_step=t.rough_noise_step,
+            ),
+            "stairs_up": HfPyramidStairsTerrainCfg(
+                proportion=t.stairs_up_proportion,
+                step_height_range=t.stair_step_height_range,
+                step_width=t.stair_step_width,
+                platform_width=t.stair_platform_width,
+            ),
+            "stairs_down": HfInvertedPyramidStairsTerrainCfg(
+                proportion=t.stairs_down_proportion,
+                step_height_range=t.stair_step_height_range,
+                step_width=t.stair_step_width,
+                platform_width=t.stair_platform_width,
+            ),
+        }
+        if HAS_PARKOUR_TERRAIN:
+            if t.discrete_obstacles_proportion > 0.0:
+                sub_terrains["discrete_obstacles"] = HfDiscreteObstaclesTerrainCfg(
+                    proportion=t.discrete_obstacles_proportion,
+                    obstacle_height_mode="choice",
+                    obstacle_width_range=t.discrete_obstacle_width_range,
+                    obstacle_height_range=t.discrete_obstacle_height_range,
+                    num_obstacles=t.discrete_obstacle_num,
+                    platform_width=t.parkour_platform_width,
+                )
+            if t.random_grid_proportion > 0.0:
+                sub_terrains["random_grid"] = MeshRandomGridTerrainCfg(
+                    proportion=t.random_grid_proportion,
+                    grid_width=t.random_grid_width,
+                    grid_height_range=t.random_grid_height_range,
+                    platform_width=t.parkour_platform_width,
+                )
+            if t.rails_proportion > 0.0:
+                sub_terrains["rails"] = MeshRailsTerrainCfg(
+                    proportion=t.rails_proportion,
+                    rail_thickness_range=t.rail_thickness_range,
+                    rail_height_range=t.rail_height_range,
+                    platform_width=t.parkour_platform_width,
+                )
+            if t.stepping_stones_proportion > 0.0:
+                sub_terrains["stepping_stones"] = HfSteppingStonesTerrainCfg(
+                    proportion=t.stepping_stones_proportion,
+                    stone_height_max=t.stepping_stone_height_max,
+                    stone_width_range=t.stepping_stone_width_range,
+                    stone_distance_range=t.stepping_stone_distance_range,
+                    platform_width=t.parkour_platform_width,
+                )
+        elif (t.discrete_obstacles_proportion > 0.0
+              or t.random_grid_proportion > 0.0
+              or t.rails_proportion > 0.0
+              or t.stepping_stones_proportion > 0.0):
+            print(
+                "[env_cfg][WARN] parkour sub-terrains were requested but this "
+                "Isaac Lab build does not expose the parkour terrain configs; "
+                "using the base flat/rough/stairs mix only.",
+                flush=True,
+            )
+
+        # With curriculum=True each COLUMN is assigned one sub-terrain by
+        # proportion, so having fewer columns than sub-terrains silently drops
+        # some types. Warn loudly rather than train on a quietly-wrong mix.
+        if t.cols < len(sub_terrains):
+            print(
+                f"[env_cfg][WARN] {len(sub_terrains)} sub-terrains but only "
+                f"{t.cols} terrain columns; some sub-terrains will not appear. "
+                f"Set terrain.cols >= {len(sub_terrains)}.",
+                flush=True,
+            )
+
+        terrain_gen = TerrainGeneratorCfg(
+            seed=t.seed,
+            size=(t.patch_size, t.patch_size),
+            border_width=t.border_width,
+            num_rows=t.rows,
+            num_cols=t.cols,
+            horizontal_scale=t.horizontal_scale,
+            vertical_scale=t.vertical_scale,
+            slope_threshold=t.slope_threshold,
+            curriculum=True,
+            sub_terrains=sub_terrains,
+        )
+        # Optional per-patch coloring (viz only). Guarded: older Isaac Lab
+        # TerrainGeneratorCfg has no color_scheme field, and "none" is a no-op.
+        cs = getattr(t, "color_scheme", "none")
+        if cs and cs != "none" and hasattr(terrain_gen, "color_scheme"):
+            terrain_gen.color_scheme = cs
         return TerrainImporterCfg(
             prim_path="/World/ground",
             terrain_type="generator",
-            terrain_generator=TerrainGeneratorCfg(
-                seed=t.seed,
-                size=(t.patch_size, t.patch_size),
-                border_width=t.border_width,
-                num_rows=t.rows,
-                num_cols=t.cols,
-                horizontal_scale=t.horizontal_scale,
-                vertical_scale=t.vertical_scale,
-                slope_threshold=t.slope_threshold,
-                curriculum=True,
-                sub_terrains={
-                    "flat": HfRandomUniformTerrainCfg(
-                        proportion=t.flat_proportion,
-                        noise_range=t.flat_noise_range,
-                        noise_step=t.flat_noise_step,
-                    ),
-                    "rough": HfRandomUniformTerrainCfg(
-                        proportion=t.rough_proportion,
-                        noise_range=t.rough_noise_range,
-                        noise_step=t.rough_noise_step,
-                    ),
-                    "stairs_up": HfPyramidStairsTerrainCfg(
-                        proportion=t.stairs_up_proportion,
-                        step_height_range=t.stair_step_height_range,
-                        step_width=t.stair_step_width,
-                        platform_width=t.stair_platform_width,
-                    ),
-                    "stairs_down": HfInvertedPyramidStairsTerrainCfg(
-                        proportion=t.stairs_down_proportion,
-                        step_height_range=t.stair_step_height_range,
-                        step_width=t.stair_step_width,
-                        platform_width=t.stair_platform_width,
-                    ),
-                },
-            ),
+            terrain_generator=terrain_gen,
             collision_group=-1,
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",

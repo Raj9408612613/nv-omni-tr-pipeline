@@ -44,31 +44,44 @@ import random
 
 import torch
 
-from .configs.base import ExperimentCfg
+from .configs.base import ExperimentCfg, PBTCfg
 from .ppo import PPOTrainer
 
-# ── Knob ranges (plan Phase 3) ───────────────────────────────────────────────
+# ── Knob identity (structural — every robot has the same 7 knobs) ────────────
 # The 4 reward knobs become per-env tensors; the 3 PPO knobs stay per-member
-# scalars applied to each member's PPOTrainer before its update.
+# scalars applied to each member's PPOTrainer before its update. The NAMES are
+# fixed (they map to RewardWeightsCfg fields + PPO hyperparams); the RANGES are
+# per-robot and read from cfg.pbt (PBTCfg) via knob_ranges().
+REWARD_KNOBS: tuple[str, ...] = (
+    "alive_bonus", "progress_w", "vel_track_w", "goal_bonus"
+)
+PPO_KNOBS: tuple[str, ...] = ("clip_eps", "ent_coef", "lr")
+KNOB_NAMES: tuple[str, ...] = REWARD_KNOBS + PPO_KNOBS
+
+
+def knob_ranges(pbt: PBTCfg) -> dict[str, tuple[float, float]]:
+    """Map each knob name to its (lo, hi) range from a PBTCfg."""
+    return {
+        "alive_bonus": pbt.alive_bonus_range,
+        "progress_w": pbt.progress_w_range,
+        "vel_track_w": pbt.vel_track_w_range,
+        "goal_bonus": pbt.goal_bonus_range,
+        "clip_eps": pbt.clip_eps_range,
+        "ent_coef": pbt.ent_coef_range,
+        "lr": pbt.lr_range,
+    }
+
+
+# Default Spot ranges (kept for back-compat / quick reference); the live ranges
+# always come from cfg.pbt so a different embodiment can declare its own.
+ALL_KNOB_RANGES: dict[str, tuple[float, float]] = knob_ranges(PBTCfg())
 REWARD_KNOB_RANGES: dict[str, tuple[float, float]] = {
-    "alive_bonus": (0.0, 0.2),
-    "progress_w": (10.0, 100.0),
-    "vel_track_w": (0.5, 3.0),
-    "goal_bonus": (10.0, 50.0),
+    k: ALL_KNOB_RANGES[k] for k in REWARD_KNOBS
 }
 PPO_KNOB_RANGES: dict[str, tuple[float, float]] = {
-    "clip_eps": (0.1, 0.3),
-    "ent_coef": (0.0, 0.02),
-    "lr": (1e-5, 1e-3),
+    k: ALL_KNOB_RANGES[k] for k in PPO_KNOBS
 }
-ALL_KNOB_RANGES: dict[str, tuple[float, float]] = {
-    **REWARD_KNOB_RANGES, **PPO_KNOB_RANGES
-}
-REWARD_KNOBS: tuple[str, ...] = tuple(REWARD_KNOB_RANGES)
-PPO_KNOBS: tuple[str, ...] = tuple(PPO_KNOB_RANGES)
-KNOB_NAMES: tuple[str, ...] = tuple(ALL_KNOB_RANGES)
-
-PERTURB_FACTORS = (0.8, 1.2)
+PERTURB_FACTORS = PBTCfg().perturb_factors
 
 # Per-step buffer keys, matching PPOTrainer.collect_rollout / _finalize_rollout.
 _BUF_KEYS = (
@@ -127,13 +140,21 @@ class Population:
         envs_per_member: int,
         device: str = "cuda",
         seed: int = 0,
-        fitness_dist_weight: float = 0.1,
+        fitness_dist_weight: float | None = None,
         init_ckpt: str | None = None,
     ):
         self.cfg = cfg
         self.envs_per_member = envs_per_member
         self.device = torch.device(device)
-        self.fitness_dist_weight = fitness_dist_weight
+        # Search space + schedule come from the per-robot PBTCfg; the caller may
+        # still override fitness_dist_weight (train_pbt CLI).
+        self._ranges = knob_ranges(cfg.pbt)
+        self._perturb_factors = tuple(cfg.pbt.perturb_factors)
+        self._ent_coef_min_init = float(cfg.pbt.ent_coef_min_init)
+        self.fitness_dist_weight = (
+            cfg.pbt.fitness_dist_weight if fitness_dist_weight is None
+            else fitness_dist_weight
+        )
         self.rng = random.Random(seed)
 
         self.members: list[Member] = []
@@ -194,15 +215,14 @@ class Population:
     # ── initial knob sampling ─────────────────────────────────────────
     def _sample_initial_knobs(self) -> dict[str, float]:
         knobs: dict[str, float] = {}
-        for knob, (lo, hi) in ALL_KNOB_RANGES.items():
+        for knob, (lo, hi) in self._ranges.items():
             if knob == "lr":
-                knobs[knob] = math.exp(
-                    self.rng.uniform(math.log(lo), math.log(hi))
-                )
+                lo_l = math.log(max(lo, 1e-12))
+                knobs[knob] = math.exp(self.rng.uniform(lo_l, math.log(hi)))
             elif knob == "ent_coef":
                 # Start strictly positive: multiplicative perturbation can never
                 # revive a knob that has hit exactly 0.
-                knobs[knob] = self.rng.uniform(max(lo, 1e-3), hi)
+                knobs[knob] = self.rng.uniform(min(max(lo, self._ent_coef_min_init), hi), hi)
             else:
                 knobs[knob] = self.rng.uniform(lo, hi)
         return knobs
@@ -380,8 +400,8 @@ class Population:
         dst.knobs = dict(src.knobs)
 
     def _perturb_knobs(self, m: Member) -> None:
-        for knob, (lo, hi) in ALL_KNOB_RANGES.items():
-            factor = self.rng.choice(PERTURB_FACTORS)
+        for knob, (lo, hi) in self._ranges.items():
+            factor = self.rng.choice(self._perturb_factors)
             m.knobs[knob] = _clamp(m.knobs[knob] * factor, lo, hi)
 
     # ── contamination guard (Phase 5) ─────────────────────────────────

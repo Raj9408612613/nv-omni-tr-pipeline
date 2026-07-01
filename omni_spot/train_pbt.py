@@ -66,12 +66,13 @@ class _Phase:
 # ── Args ─────────────────────────────────────────────────────────────────────
 _parser = argparse.ArgumentParser(description="Population-Based Training teacher")
 _parser.add_argument("--robot", type=str, default="spot")
-_parser.add_argument("--pop_size", type=int, default=24)
-_parser.add_argument("--envs_per_member", type=int, default=2048)
+# None => use the per-robot cfg.pbt value (PBTCfg); CLI overrides when given.
+_parser.add_argument("--pop_size", type=int, default=None)
+_parser.add_argument("--envs_per_member", type=int, default=None)
 _parser.add_argument("--total_updates", type=int, default=1500)
-_parser.add_argument("--pbt_interval", type=int, default=50)
-_parser.add_argument("--pbt_warmup", type=int, default=100)
-_parser.add_argument("--fitness_dist_weight", type=float, default=0.1)
+_parser.add_argument("--pbt_interval", type=int, default=None)
+_parser.add_argument("--pbt_warmup", type=int, default=None)
+_parser.add_argument("--fitness_dist_weight", type=float, default=None)
 _parser.add_argument("--update_mode", choices=["loop", "vmap"], default="loop",
                      help="loop = sequential per-member PPO (reference); "
                           "vmap = batched functional_call+vmap update")
@@ -90,33 +91,52 @@ _parser.add_argument("--vram_probe", type=int, default=0, metavar="N",
 # CPU smoke path (no Isaac Lab).
 _parser.add_argument("--mock", action="store_true",
                      help="Use the pure-PyTorch MockEnv (no Isaac Sim)")
-_parser.add_argument("--device", type=str, default="cuda")
+# NOTE: --device is provided by AppLauncher.add_app_launcher_args for real runs
+# (adding it here would collide). It is only added manually in the mock branch.
 
 # ── Launch Isaac Sim BEFORE importing Isaac Lab sub-modules (unless --mock) ──
-_HAS_APP = False
-try:
-    from isaaclab.app import AppLauncher
-    _HAS_APP = True
-except ImportError:
+# Decide mock from argv up front: in mock mode we must NOT touch Isaac at all.
+_WANT_MOCK = "--mock" in sys.argv
+AppLauncher = None
+_app_import_errs = None
+if not _WANT_MOCK:
     try:
-        from omni.isaac.lab.app import AppLauncher
-        _HAS_APP = True
-    except ImportError:
-        AppLauncher = None
+        from isaaclab.app import AppLauncher            # Isaac Lab 2.x
+    except Exception as _e1:  # noqa: BLE001 — surface the real cause below
+        try:
+            from omni.isaac.lab.app import AppLauncher  # Isaac Lab 1.x
+        except Exception as _e2:  # noqa: BLE001
+            _app_import_errs = (_e1, _e2)
 
-if _HAS_APP:
+if AppLauncher is not None:
     AppLauncher.add_app_launcher_args(_parser)
 else:
-    # Keep --headless accepted even when Isaac Lab is absent (mock runs).
+    # --mock path (or Isaac missing): keep these flags accepted so the parser
+    # does not choke on them, and supply --device (AppLauncher would otherwise).
     _parser.add_argument("--headless", action="store_true")
+    _parser.add_argument("--enable_cameras", action="store_true")
+    _parser.add_argument("--device", type=str, default="cpu")
 
 args = _parser.parse_args()
 
 simulation_app = None
 if not args.mock:
-    if not _HAS_APP:
-        print("[ERROR] Isaac Lab not found and --mock not set. Install Isaac "
-              "Lab or pass --mock for the CPU smoke path.", flush=True)
+    if AppLauncher is None:
+        print("[ERROR] Could not import Isaac Lab (tried isaaclab.app and "
+              "omni.isaac.lab.app). This is an ENVIRONMENT problem, not a "
+              "train_pbt bug — `python -c \"import isaaclab\"` and train.py "
+              "will fail the same way.", flush=True)
+        if _app_import_errs is not None:
+            print(f"        isaaclab.app      -> "
+                  f"{type(_app_import_errs[0]).__name__}: {_app_import_errs[0]}",
+                  flush=True)
+            print(f"        omni.isaac.lab.app-> "
+                  f"{type(_app_import_errs[1]).__name__}: {_app_import_errs[1]}",
+                  flush=True)
+        print("        Fix: install Isaac Lab from your clone (see "
+              "scripts/isaac_run.sh stage 4):", flush=True)
+        print("          pip install --no-deps -e <IsaacLab>/source/isaaclab", flush=True)
+        print("        or pass --mock for the CPU smoke path.", flush=True)
         sys.exit(1)
     print("[INIT] Launching Isaac Sim (first run takes ~5 min for shader "
           "compilation)...", flush=True)
@@ -198,10 +218,18 @@ def main() -> int:
         print("[WARN] CUDA unavailable; falling back to CPU.", flush=True)
         device = "cpu"
 
+    # Resolve PBT scale/schedule: CLI flag wins, else the per-robot cfg.pbt.
+    def _pick(cli, cfg_val):
+        return cfg_val if cli is None else cli
+    pop_size = _pick(args.pop_size, cfg.pbt.pop_size)
+    envs_per_member = _pick(args.envs_per_member, cfg.pbt.envs_per_member)
+    pbt_interval = _pick(args.pbt_interval, cfg.pbt.pbt_interval)
+    pbt_warmup = _pick(args.pbt_warmup, cfg.pbt.pbt_warmup)
+
     # ── Population (members + per-env reward-weight tiling) ──────────────
     with _Phase("Population construction"):
         pop = Population(
-            cfg, n_members=args.pop_size, envs_per_member=args.envs_per_member,
+            cfg, n_members=pop_size, envs_per_member=envs_per_member,
             device=device, seed=args.seed,
             fitness_dist_weight=args.fitness_dist_weight,
             init_ckpt=args.init_ckpt,
@@ -221,9 +249,9 @@ def main() -> int:
     # any resume, since load reallocates them).
     env._reward_weights = pop.reward_weights
 
-    print(f"[CONFIG] pop_size={args.pop_size} envs_per_member="
-          f"{args.envs_per_member} total_envs={total_envs} n_steps={n_steps} "
-          f"interval={args.pbt_interval} warmup={args.pbt_warmup} "
+    print(f"[CONFIG] pop_size={pop_size} envs_per_member="
+          f"{envs_per_member} total_envs={total_envs} n_steps={n_steps} "
+          f"interval={pbt_interval} warmup={pbt_warmup} "
           f"update_mode={args.update_mode} device={device} mock={args.mock}",
           flush=True)
 
@@ -312,8 +340,8 @@ def main() -> int:
                   flush=True)
 
         # ── PBT: exploit / explore ──────────────────────────────────────
-        do_pbt = (update >= args.pbt_warmup
-                  and update % args.pbt_interval == 0
+        do_pbt = (update >= pbt_warmup
+                  and update % pbt_interval == 0
                   and probe == 0)
         if do_pbt:
             events = pop.evolve()
@@ -356,15 +384,15 @@ def main() -> int:
 
     if probe > 0:
         report_gpu_memory(f"after {probe} probe updates")
-        print(f"[PROBE] {probe} updates done for pop_size={args.pop_size}, "
-              f"envs_per_member={args.envs_per_member}. See peak VRAM above.",
+        print(f"[PROBE] {probe} updates done for pop_size={pop_size}, "
+              f"envs_per_member={envs_per_member}. See peak VRAM above.",
               flush=True)
     else:
         _save_full(os.path.join(out_dir, "population_final.pt"), pop, last_updates)
         pop.top_member().trainer.save(os.path.join(out_dir, "best.pt"))
         with open(os.path.join(args.log_dir, "SUCCESS"), "w") as f:
             f.write(f"phase=pbt robot={cfg.robot.name} "
-                    f"pop_size={args.pop_size} timesteps={timesteps} "
+                    f"pop_size={pop_size} timesteps={timesteps} "
                     f"run={run_id}\n")
         print(f"[DONE] PBT complete: {timesteps:,} timesteps. "
               f"Best fitness {best_fitness:.3f}. Artifacts in {out_dir}",
