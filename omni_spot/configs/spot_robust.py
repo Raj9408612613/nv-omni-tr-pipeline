@@ -26,12 +26,20 @@ These recovery weights are sensible starting points; PBT can search them.
 
 from __future__ import annotations
 
+from .base import ExperimentCfg
 from .spot import make_cfg as _spot_make_cfg
 
 
-def make_cfg():
-    cfg = _spot_make_cfg()
+def apply_recovery(cfg: ExperimentCfg) -> ExperimentCfg:
+    """Turn any config into a full-get-up / recovery config (in place).
 
+    Edits ONLY `cfg.reward` and `cfg.dr` (fall handling + recovery shaping +
+    pushes); it never touches terrain, so it composes cleanly with the terrain
+    lineage (spot_hard / spot_parkour). This is the single source of truth for
+    the recovery knobs — spot_parkour_robust and spot_master reuse it so the
+    values can never drift out of sync. Leg failure is left OFF; layer it on
+    with `spot_robust_legfail.apply_leg_failure` for the one-leg-disable skill.
+    """
     r = cfg.reward
     # Full get-up: a fall does not end the episode.
     r.terminate_on_fall = False
@@ -43,6 +51,10 @@ def make_cfg():
     d = cfg.dr
     d.enabled = True
     d.push_robots = True       # must recover from perturbations
-    # Leg failure stays OFF this round (turned on in spot_robust_legfail).
+    # Leg failure stays OFF here (turned on in spot_robust_legfail / spot_master).
 
     return cfg
+
+
+def make_cfg():
+    return apply_recovery(_spot_make_cfg())

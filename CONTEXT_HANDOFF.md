@@ -267,11 +267,18 @@ Merged `claude/brave-edison-8btmmy` (test tooling) INTO `quirky-dirac`. Resoluti
   Catastrophic-forgetting is avoided because the FINAL combined config keeps ALL terrain
   types in the mix WHILE adding recovery+leg-failure (everything present simultaneously;
   different envs get different conditions per episode).
-- **Recommended next configs to BUILD (not done yet):**
-  - `spot_parkour_robust` = spot_parkour terrain + spot_robust reward/dr (leg-fail off).
+- **Combined configs — NOW BUILT (this session):**
+  - `spot_parkour_robust` = spot_parkour terrain + recovery reward/dr (leg-fail OFF).
   - `spot_master` = everything on (parkour terrain + get-up + leg-fail). Final = investor demo.
-  Composition is trivial (disjoint fields): start from one lineage's make_cfg(), then apply the
-  other lineage's reward/dr (or terrain) edits.
+  Composition was done via disjoint-field helpers so the magic numbers have a single source of
+  truth (no drift): `spot_robust.apply_recovery(cfg)` edits reward+dr only; `spot_robust_legfail
+  .apply_leg_failure(cfg)` edits the dr leg-failure fields only. `spot_robust.make_cfg` /
+  `spot_robust_legfail.make_cfg` now just call these helpers (output unchanged, verified).
+  So `spot_parkour_robust = apply_recovery(spot_parkour())` and
+  `spot_master = apply_leg_failure(spot_parkour_robust())`. Validated by config import +
+  assertions: master has rows=6/cols=14, parkour props on, terminate_on_fall=False, recover_w=0.5,
+  leg_failure_prob=0.15; parkour_robust identical but leg-fail OFF. The **workflow chain the user
+  asked for** is now: `spot → spot_robust → spot_parkour_robust → spot_master → distill`.
 - **PBT knobs:** open question — whether to add `recover_w`/`ang_vel_w` to `PBTCfg` search space
   so the population tunes them, or leave fixed for the first run.
 
@@ -318,16 +325,32 @@ spawn-end** (so it can't memorize "move forward").
 ---
 
 ## 10. WARM-START CHAIN & COMMANDS (run on the EC2 box, `isaac` env, repo root)
+### ⭐ The user's chosen investor chain (run these, in order):
 ```bash
-# Round-1 robustness (get-up), warm-started from the current spot teacher best:
+# Stage 1 — recovery / get-up on the CURRENT terrain, warm-started from spot best:
 PYTHONPATH=. python -m omni_spot.train_pbt --robot spot_robust \
     --init_ckpt omni_logs/<spot_run>/best.pt --headless
 
-# Round-2 (add one-leg disable), warm-started from the spot_robust best:
+# Stage 2 — add hard + parkour terrain, KEEP recovery (leg-fail off),
+#           warm-started from the spot_robust best (carry the get-up skill):
+PYTHONPATH=. python -m omni_spot.train_pbt --robot spot_parkour_robust \
+    --init_ckpt omni_logs/<spot_robust_run>/best.pt --headless
+
+# Stage 3 (FINAL) — add one-leg failure, EVERYTHING on,
+#           warm-started from the spot_parkour_robust best:
+PYTHONPATH=. python -m omni_spot.train_pbt --robot spot_master \
+    --init_ckpt omni_logs/<spot_parkour_robust_run>/best.pt --headless
+
+# then distill spot_master -> ONE depth-camera student (see below).
+```
+### Alternate / component runs (still valid, same helpers underneath):
+```bash
+# Round-2 one-leg disable on the EASY terrain (no parkour) — spot_master is the
+# preferred final; this is the easy-terrain-only variant:
 PYTHONPATH=. python -m omni_spot.train_pbt --robot spot_robust_legfail \
     --init_ckpt omni_logs/<spot_robust_run>/best.pt --headless
 
-# Terrain headroom (independent track), warm-started from spot best:
+# Pure terrain-headroom track (no recovery), warm-started from spot best:
 PYTHONPATH=. python -m omni_spot.train_pbt --robot spot_hard \
     --init_ckpt omni_logs/<spot_run>/best.pt --headless
 PYTHONPATH=. python -m omni_spot.train_pbt --robot spot_parkour \
@@ -347,12 +370,17 @@ switch on — that's the new skill forming.
 ---
 
 ## 11. IMMEDIATE NEXT TASKS (suggested order)
-1. (Optional) Build combined configs: `spot_parkour_robust`, `spot_master` (all-skills).
-2. Decide PBT search space: add `recover_w`/`ang_vel_w` to `PBTCfg` or leave fixed.
-3. If pursuing shaped arenas: spec + build a randomized corridor/L/T custom-heightfield
-   terrain + waypoint goals in nav_env (keep per-env randomization for generalization).
-4. Kick off Round-1 (`spot_robust`) on the box; iterate on any runtime traceback.
-5. After robust teacher converges → distill student → re-run `student_overview.py` to verify.
+1. ~~Build combined configs `spot_parkour_robust`, `spot_master`.~~ **DONE** (this session;
+   registered, import- and assertion-validated). Ready to train.
+2. Kick off the chain on the box, in order: `spot_robust` → `spot_parkour_robust` →
+   `spot_master`, each `--init_ckpt`-seeded from the prior stage's best.pt (see §10). Iterate
+   on any first-run traceback (leg-failure kp/kv write + `terminate_on_fall` path + parkour
+   terrain build are the untested-in-container spots — see §9).
+3. After `spot_master` converges → distill ONE depth-camera student (DAgger) → run
+   `student_overview.py` to verify the whole repertoire for the demo.
+4. Decide PBT search space: add `recover_w`/`ang_vel_w` to `PBTCfg` or leave fixed.
+5. (Optional) shaped arenas: randomized corridor/L/T custom-heightfield terrain + waypoint
+   goals in nav_env (keep per-env randomization for generalization).
 
 ## Conventions
 - Commit trailers used this session:
