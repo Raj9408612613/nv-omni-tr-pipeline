@@ -34,12 +34,11 @@ set -euo pipefail
 ENV_NAME="isaac"
 PY_VERSION="3.11"
 TORCH_CUDA="cu128"                 # Blackwell / driver 580. Adjust if needed.
-TORCH_INDEX="https://download.pytorch.org/whl/${TORCH_CUDA}"
-TORCH_NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/${TORCH_CUDA}"
-# Compute capability the GPU needs in torch.cuda.get_arch_list(). Blackwell
-# (RTX PRO 6000) is sm_120 — stable cu128 wheels have lacked it, so we verify
-# and fall back to nightly. Set to "" to skip the arch check on other GPUs.
-TORCH_REQUIRED_ARCH="sm_120"
+TORCH_VERSION="2.7.0"              # MUST match Isaac Lab's pin. The cu128 build
+                                   # of this version is what carries sm_120
+                                   # (Blackwell) kernels; the default-index
+                                   # cu126 build of the SAME version does not.
+TORCHVISION_VERSION="0.22.0"       # pairs with torch 2.7.0
 NVIDIA_DRIVER="nvidia-driver-580-open"
 SWAP_SIZE="32G"
 CONDA_DIR="$HOME/miniconda3"
@@ -54,40 +53,6 @@ RUN_TRAINING=false
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== isaac_run.sh started $(date) | repo=$REPO_DIR | env=$ENV_NAME ==="
-
-# ── Torch helpers (Blackwell sm_120 needs a recent cu128 / nightly build) ────
-torch_arch_ok() {
-    # exit 0 if torch imports AND (no required arch OR it's in the arch list)
-    python - "${TORCH_REQUIRED_ARCH:-}" <<'PY' 2>/dev/null
-import sys
-req = sys.argv[1] if len(sys.argv) > 1 else ""
-try:
-    import torch
-except Exception:
-    sys.exit(1)
-sys.exit(0 if (not req or req in torch.cuda.get_arch_list()) else 2)
-PY
-}
-
-ensure_torch() {
-    # Guarantee an installed torch whose kernels cover TORCH_REQUIRED_ARCH.
-    if torch_arch_ok; then
-        echo "    torch OK: $(python -c 'import torch;print(torch.__version__)') | arch=$(python -c 'import torch;print(torch.cuda.get_arch_list())' 2>/dev/null)"
-        return 0
-    fi
-    # torch ONLY — the pipeline never imports torchvision, and on nightly
-    # torch+torchvision pin each other (ResolutionImpossible). Uninstall any
-    # stray torchvision so it can't drag torch to a non-Blackwell build.
-    echo "    [torch] need ${TORCH_REQUIRED_ARCH:-any}; (re)installing stable ${TORCH_CUDA}..."
-    pip uninstall -y torch torchvision >/dev/null 2>&1 || true
-    pip install torch --index-url "$TORCH_INDEX" || true
-    if ! torch_arch_ok; then
-        echo "    [torch] stable ${TORCH_CUDA} lacks ${TORCH_REQUIRED_ARCH}; trying nightly ${TORCH_CUDA}..."
-        pip uninstall -y torch >/dev/null 2>&1 || true
-        pip install --pre torch --index-url "$TORCH_NIGHTLY_INDEX"
-    fi
-    torch_arch_ok || echo "    [torch][WARN] ${TORCH_REQUIRED_ARCH} still missing — check pytorch.org for a Blackwell build"
-}
 
 # =============================================================================
 # Stage 0 — system packages + NVIDIA driver (reboot gate)
@@ -143,8 +108,9 @@ echo "    active python: $(python --version)"
 # =============================================================================
 # Stage 2 — PyTorch (CUDA) + sanity check
 # =============================================================================
-echo ">>> Stage 2: PyTorch ($TORCH_CUDA, need arch ${TORCH_REQUIRED_ARCH:-any}) + build tooling"
+echo ">>> Stage 2: PyTorch ($TORCH_CUDA) + build tooling"
 pip install "setuptools<75.0.0"
+
 # (Re)install torch if it is missing OR if the installed build lacks compiled
 # kernels for THIS GPU's compute arch. The latter is the classic Blackwell
 # trap: `pip install torch` (default index) gives a CUDA 12.6 build whose
@@ -166,21 +132,30 @@ arch = f"sm_{cap[0]}{cap[1]}"
 sys.exit(0 if arch in torch.cuda.get_arch_list() else 1)
 PY
 }
-if torch_arch_ok; then
-    echo "    torch present and supports this GPU's compute arch"
-else
-    echo "    torch missing or wrong CUDA build for this GPU — installing $TORCH_CUDA ..."
-    pip install --force-reinstall --no-cache-dir torch torchvision \
-        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
-    # If $TORCH_CUDA stable still lacks your arch (very new GPU), switch to the
-    # matching nightly index, e.g. .../whl/nightly/cu128, and re-run.
-fi
+
+# Install the pinned, GPU-arch-correct torch ONLY when the current install is
+# missing or built for the wrong arch. Idempotent: a no-op once the right wheel
+# is in place, so re-running the script does NOT redownload/reinstall torch
+# every time. No --no-cache-dir, so the rare reinstall reuses the pip cache
+# instead of pulling the ~3 GB wheel again.
+ensure_torch() {
+    if torch_arch_ok; then
+        echo "    torch OK — present and has kernels for this GPU's compute arch"
+    else
+        echo "    torch missing or wrong CUDA build — installing torch==$TORCH_VERSION ($TORCH_CUDA) ..."
+        pip install --force-reinstall \
+            "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+            --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
+        # If $TORCH_CUDA stable still lacks your arch (very new GPU), switch to
+        # the matching nightly index, e.g. .../whl/nightly/cu128, and re-run.
+    fi
+}
+ensure_torch
 python - <<'PY'
 import torch
 ok = torch.cuda.is_available()
 name = torch.cuda.get_device_name(0) if ok else "NO GPU VISIBLE"
 print(f"    torch {torch.__version__} | cuda_available={ok} | {name}")
-print(f"    arch_list: {torch.cuda.get_arch_list()}")
 PY
 
 # =============================================================================
@@ -222,25 +197,26 @@ if python -c "import isaaclab" 2>/dev/null; then
 else
     pushd "$ISAACLAB_DIR" >/dev/null
     pip install --no-deps -e source/isaaclab
+    pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
+        prettytable==3.3.0 flatdict
     pip install --use-deprecated=legacy-resolver -e source/isaaclab_assets
     pip install --use-deprecated=legacy-resolver -e source/isaaclab_tasks
     popd >/dev/null
 fi
+pip install tensorboard "imageio[ffmpeg]" h5py
 
-# Runtime Python deps — ALWAYS install (idempotent), even when isaaclab was
-# already -e installed. Missing any of these only surfaces much later as a
-# cryptic ModuleNotFoundError during env build (e.g. h5py), so install them
-# unconditionally rather than gating behind the clone step above.
-pip install toml gymnasium==1.2.1 trimesh einops warp-lang prettytable==3.3.0 \
-    flatdict tensorboard "imageio[ffmpeg]" h5py
+# Isaac Sim / Isaac Lab declare their own torch dependency and, when they (re)
+# install, can silently swap our cu128 wheel for a default-index cu126 build
+# that has NO sm_120 kernels — the exact "no kernel image" trap. Re-assert the
+# correct build now, AFTER those installs, so torch has the last word. This is
+# why earlier runs seemed to "reinstall every time": Stage 2 fixed torch, then
+# Stage 4 clobbered it. Idempotent once stable.
+echo ">>> Re-verifying torch CUDA arch after Isaac install"
+ensure_torch
 
 echo "    import check:"
 python -c "import isaacsim; print('      isaacsim OK')" || echo "      isaacsim FAILED"
 python -c "import isaaclab; print('      isaaclab OK')" || echo "      isaaclab FAILED"
-
-# Isaac Sim's deps can swap torch for a build without sm_120 — repair if so.
-echo ">>> Re-verifying torch arch after Isaac install"
-ensure_torch
 
 # =============================================================================
 # Stage 5 — smoke tests + (optional) full teacher training
