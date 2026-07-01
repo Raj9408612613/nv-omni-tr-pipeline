@@ -15,7 +15,20 @@ repertoire.
 
 Concretely the end state is the **`spot_master`** policy (all knobs on:
 parkour terrain + get-up recovery + one-leg failure), reached via a progressive
-warm-start chain, then distilled. Treat individual rounds (`spot_hard`,
+warm-start chain, then distilled.
+
+**How every training round runs: PBT (Population-Based Training).** Each round
+below is NOT a single run — it is a **full PBT population run** launched with
+`python -m omni_spot.train_pbt --robot <config> [--init_ckpt <prev best.pt>]`.
+PBT trains a population of members in parallel and **evolves their
+hyperparameters** during the run (the search space is `PBTCfg` in `base.py`; the
+per-env reward-weight override in `nav_env` is how PBT applies per-member reward
+knobs). `--init_ckpt` **warm-starts the ENTIRE population** from the previous
+round's best member. `best.pt` = the population's best member, which seeds the
+next round. So "the warm-start chain" = a sequence of PBT runs, each seeded by
+the prior run's best.
+
+Treat individual rounds (`spot_hard`,
 `spot_parkour`, `spot_robust`, `spot_robust_legfail`) as **steps toward this one
 combined policy**, not as separate deliverables. Bias every decision toward
 shipping that single all-skills policy + its student. See §7 and §11.
@@ -240,8 +253,9 @@ Merged `claude/brave-edison-8btmmy` (test tooling) INTO `quirky-dirac`. Resoluti
 - **Axes:** Axis-1 (terrain difficulty) + Axis-3 (robustness: recover-not-terminate +
   one-leg disable). **Skip Axis-2** (longer nav goals — already fine).
 - **One policy that does EVERYTHING** (the investor goal): all configs are the same network;
-  reach an all-skills policy via a **progressive warm-start chain** (each stage keeps prior
-  challenges and adds one), final config has all knobs on:
+  reach an all-skills policy via a **progressive warm-start chain of PBT runs** (each stage is
+  a full `train_pbt` population run, `--init_ckpt`-seeded from the prior stage's best.pt, and
+  keeps prior challenges while adding one), final config has all knobs on:
   `spot → spot_hard → spot_parkour → +recovery → +leg-fail`.
   Catastrophic-forgetting is avoided because the FINAL combined config keeps ALL terrain
   types in the mix WHILE adding recovery+leg-failure (everything present simultaneously;
