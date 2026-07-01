@@ -33,6 +33,12 @@ Treat individual rounds (`spot_hard`,
 combined policy**, not as separate deliverables. Bias every decision toward
 shipping that single all-skills policy + its student. See §7 and §11.
 
+Recommended order of training. 
+spot                     (base, exists)
+ └─ spot_robust          recovery / get-up on CURRENT terrain   ← do this FIRST
+     └─ spot_parkour_robust   add hard + parkour terrain, KEEP recovery
+         └─ spot_master        add one-leg failure (everything on)  ← FINAL
+              └─ distill → one student for the investor demo
 ---
 
 ## 0. TL;DR
