@@ -302,6 +302,114 @@ if HAS_ISAAC:
             debug_vis=False,
         )
 
+    def _build_course_terrain(x: ExperimentCfg):
+        """Shaped-course terrain (straight/L/T corridors; see omni_spot/course.py).
+
+        Grid: num_rows = difficulty rows (harshness only), num_cols =
+        n_variants (each column is ONE distinct course layout, so the env can
+        map terrain_types -> variant -> centerline deterministically).
+        The heavy lifting (layout + heightfield painting) is pure numpy in
+        course.py; this wrapper only adapts it to @height_field_to_mesh.
+        """
+        from .course import build_layout, paint_course
+        try:
+            from isaaclab.terrains.height_field import HfTerrainBaseCfg
+            from isaaclab.terrains.height_field.utils import height_field_to_mesh
+        except ImportError:  # Isaac Lab 1.x
+            from omni.isaac.lab.terrains.height_field import HfTerrainBaseCfg  # type: ignore
+            from omni.isaac.lab.terrains.height_field.utils import (  # type: ignore
+                height_field_to_mesh,
+            )
+        c = x.course
+
+        @height_field_to_mesh
+        def course_fn(difficulty, cfg):
+            layout = build_layout(
+                cfg.variant,
+                cell_size=float(cfg.size[0]),
+                seg_len=cfg.seg_len,
+                end_pad=cfg.end_pad,
+                bend_pad=cfg.bend_pad,
+                shapes=tuple(cfg.shapes),
+                dense_step=cfg.dense_step,
+                base_seed=cfg.layout_seed,
+            )
+            return paint_course(
+                layout, float(difficulty),
+                cell_size=float(cfg.size[0]),
+                horizontal_scale=cfg.horizontal_scale,
+                vertical_scale=cfg.vertical_scale,
+                lane_width=cfg.lane_width,
+                wall_height=cfg.wall_height,
+                stair_height_range=tuple(cfg.stair_height_range),
+                rough_noise_range=tuple(cfg.rough_noise_range),
+                step_width=cfg.step_width,
+            )
+
+        @configclass
+        class HfCourseCfg(HfTerrainBaseCfg):
+            function = course_fn
+            variant: int = 0
+            lane_width: float = 3.5
+            wall_height: float = 1.0
+            seg_len: float = 4.5
+            end_pad: float = 2.0
+            bend_pad: float = 1.2
+            shapes: tuple = ("straight", "L", "T")
+            dense_step: float = 0.25
+            layout_seed: int = 1234
+            stair_height_range: tuple = (0.06, 0.28)
+            rough_noise_range: tuple = (0.02, 0.16)
+            step_width: float = 0.32
+
+        sub = {
+            f"course_{k:02d}": HfCourseCfg(
+                proportion=1.0 / c.n_variants,
+                variant=k,
+                lane_width=c.lane_width,
+                wall_height=c.wall_height,
+                seg_len=c.seg_len,
+                end_pad=c.end_pad,
+                bend_pad=c.bend_pad,
+                shapes=tuple(c.shapes),
+                dense_step=c.dense_step,
+                layout_seed=c.layout_seed,
+                stair_height_range=tuple(c.stair_height_range),
+                rough_noise_range=tuple(c.rough_noise_range),
+                step_width=c.step_width,
+            )
+            for k in range(c.n_variants)
+        }
+        terrain_gen = TerrainGeneratorCfg(
+            seed=x.terrain.seed,
+            size=(c.cell_size, c.cell_size),
+            border_width=1.0,
+            num_rows=c.rows,
+            num_cols=c.n_variants,
+            horizontal_scale=x.terrain.horizontal_scale,
+            vertical_scale=x.terrain.vertical_scale,
+            slope_threshold=x.terrain.slope_threshold,
+            curriculum=True,
+            sub_terrains=sub,
+        )
+        cs = getattr(x.terrain, "color_scheme", "none")
+        if cs and cs != "none" and hasattr(terrain_gen, "color_scheme"):
+            terrain_gen.color_scheme = cs
+        return TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="generator",
+            terrain_generator=terrain_gen,
+            collision_group=-1,
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            ),
+            debug_vis=False,
+        )
+
     def _build_robot(x: ExperimentCfg) -> ArticulationCfg:
         r = x.robot
         actuator_kwargs = dict(
@@ -411,13 +519,24 @@ if HAS_ISAAC:
 
     def build_env_cfg(x: ExperimentCfg, num_envs: int) -> NavEnvCfg:
         """Assemble the full DirectRLEnvCfg from the experiment config."""
+        use_course = (
+            getattr(x, "course", None) is not None and x.course.enabled
+        )
         scene = InteractiveSceneCfg(
-            num_envs=num_envs, env_spacing=x.terrain.patch_size
+            num_envs=num_envs,
+            env_spacing=(x.course.cell_size if use_course
+                         else x.terrain.patch_size),
         )
         # Insertion order matters: robot before sensors that attach to it.
-        if HAS_TERRAIN:
+        if HAS_TERRAIN and use_course:
+            scene.terrain = _build_course_terrain(x)
+        elif HAS_TERRAIN:
             scene.terrain = _build_terrain(x)
         else:
+            if use_course:
+                print("[env_cfg][WARN] course terrain requested but terrain "
+                      "generator unavailable; flat ground plane fallback.",
+                      flush=True)
             scene.ground = _build_terrain(x)
         scene.robot = _build_robot(x)
         for name, cfg in _build_obstacles(x).items():

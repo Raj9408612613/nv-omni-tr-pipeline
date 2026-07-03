@@ -277,7 +277,42 @@ Merged `claude/brave-edison-8btmmy` (test tooling) INTO `quirky-dirac`. Resoluti
 
 ---
 
-## 8. DISCUSSED, NOT BUILT — terrain-shape redesign + path following
+## 8. BUILT — shaped course arenas + carrot goal-planning (`omni_spot/course.py`)
+STATUS: implemented and CPU-validated (layout/painter/carrot unit tests pass);
+NOT yet run in Isaac sim. Decisions locked with the user: **option A** (courses
+are a POLISH stage after spot_master + the demo arena, not the main training
+terrain) and **harshness-only rows** (every row mixes straight/L/T by column
+seed; difficulty scales stair height/rough noise only — geometry is
+row-invariant, which is what lets the env rebuild every centerline from the
+variant id alone).
+
+What exists:
+- `omni_spot/course.py` (PURE numpy/torch — unit-testable without Isaac):
+  `build_layout(variant, ...)` deterministic geometry (straight/L/T; T has a
+  walkable dead-end stub as a distractor; flat pads at both ends and around
+  bends; stairs emitted as PAIRED equal-length hills/valleys so the lane
+  always returns to z=0 — pins spawn height for both traversal directions);
+  `paint_course(layout, difficulty, ...)` int16 heightfield painter (lane at
+  path elevation, rough noise on rough segments, off-lane wall plateau =
+  max+wall_height so no shortcuts; carves a tiny z=0 plaza at the cell center
+  so Isaac's origin-z is deterministic); `CourseRuntime` torch carrot
+  (monotonic forward-window projection, direction reversal via index
+  mirroring, carrot clamps at the end so goal_bonus fires only at the finish).
+- `CourseCfg` in base.py (enabled=False default → zero behavior change),
+  registered on ExperimentCfg as `cfg.course`.
+- `env_cfg.py::_build_course_terrain` — @height_field_to_mesh wrapper +
+  HfCourseCfg; one sub-terrain per variant column (equal proportions) so
+  `terrain_types` == variant id; build_env_cfg swaps terrain + env_spacing
+  when course.enabled.
+- `nav_env.py` course mode: reset spawns at a RANDOM course end (+jitter,
+  random yaw), initial carrot as goal; per-step carrot advance in _get_dones
+  (before termination/reward); curriculum promote/demote uses ARC-LENGTH
+  fraction (`_course_frac`) instead of straight-line progress.
+- Configs: `spot_course` (course smoke test on the robust reward),
+  `spot_parkour_robust` (stage 3), `spot_master` (stage 4, ALL skills),
+  `spot_master_course` (stage 5 polish = master on courses).
+
+Original design rationale (kept for reference):
 User wants training terrain that is **not one square box** but **elongated/shaped arenas**
 (straight corridor of fixed width with terrain changing along the length; **L- or T-shaped**
 so the robot must change direction midway), goal at the far end, **random spawn + random
@@ -347,12 +382,20 @@ switch on — that's the new skill forming.
 ---
 
 ## 11. IMMEDIATE NEXT TASKS (suggested order)
-1. (Optional) Build combined configs: `spot_parkour_robust`, `spot_master` (all-skills).
-2. Decide PBT search space: add `recover_w`/`ang_vel_w` to `PBTCfg` or leave fixed.
-3. If pursuing shaped arenas: spec + build a randomized corridor/L/T custom-heightfield
-   terrain + waypoint goals in nav_env (keep per-env randomization for generalization).
-4. Kick off Round-1 (`spot_robust`) on the box; iterate on any runtime traceback.
-5. After robust teacher converges → distill student → re-run `student_overview.py` to verify.
+The full config chain now EXISTS: spot → spot_robust → spot_parkour_robust →
+spot_master → spot_master_course (+ spot_course as the course smoke test).
+1. Kick off Round-1 (`spot_robust`) PBT on the box, warm-started from the spot
+   best; iterate on any runtime traceback (recovery/termination-grace paths
+   are sim-untested).
+2. Smoke-test the course infra in sim early (`spot_course`, or just build the
+   env with few envs) — the @height_field_to_mesh wrapper + terrain_types
+   mapping + carrot are the untested Isaac touchpoints.
+3. Decide PBT search space: add `recover_w`/`ang_vel_w` to `PBTCfg` or leave fixed.
+4. Continue the chain: spot_parkour_robust → spot_master → (short)
+   spot_master_course polish.
+5. Distill the student from the final teacher → verify with
+   `student_overview.py` / `student_test-hard.py` → investor demo video
+   (courses + get-up + leg-failure showcases).
 
 ## Conventions
 - Commit trailers used this session:

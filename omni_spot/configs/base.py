@@ -185,6 +185,41 @@ class CurriculumCfg:
     demote_progress_frac: float = 0.25
 
 
+@dataclass
+class CourseCfg:
+    """Shaped course arenas (straight / L / T corridors) + carrot goals.
+
+    enabled=False (default) -> standard patch-grid terrain, byte-for-byte
+    unchanged behavior. When enabled, build_env_cfg swaps the terrain for a
+    rows x n_variants grid where each CELL is a whole course (see
+    omni_spot/course.py): the column (variant) decides shape + segment order,
+    the difficulty ROW scales harshness only (geometry is row-invariant, so
+    the env can reconstruct every centerline from the variant id alone).
+    Goals are fed as a moving carrot on the centerline; the robot spawns at a
+    RANDOM END with random yaw and must traverse to the opposite end.
+    """
+    enabled: bool = False
+    cell_size: float = 18.0         # m, square course cell
+    lane_width: float = 3.5         # walkable corridor width
+    wall_height: float = 1.0        # off-lane plateau above highest lane point
+    rows: int = 6                   # difficulty rows (harshness only)
+    n_variants: int = 12            # columns = distinct course layouts
+    seg_len: float = 4.5            # nominal terrain-segment length (m)
+    end_pad: float = 2.0            # flat pad at both ends (spawn/goal)
+    bend_pad: float = 1.2           # flat zone around L/T bends
+    shapes: tuple[str, ...] = ("straight", "L", "T")
+    dense_step: float = 0.25        # centerline resample step (m)
+    layout_seed: int = 1234
+    # Harshness (scaled by difficulty row, geometry unchanged)
+    stair_height_range: tuple[float, float] = (0.06, 0.28)
+    rough_noise_range: tuple[float, float] = (0.02, 0.16)
+    step_width: float = 0.32
+    # Carrot goal-planning
+    lookahead: float = 2.5          # m ahead along the path (trained goal range)
+    window: int = 24                # forward search window (x dense_step m)
+    spawn_jitter: float = 0.3       # m of xy noise at the spawn pad
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Sensors
 # ════════════════════════════════════════════════════════════════════════════
@@ -429,6 +464,7 @@ class ExperimentCfg:
     obstacles: ObstacleCfg = field(default_factory=ObstacleCfg)
     terrain: TerrainCfg = field(default_factory=TerrainCfg)
     curriculum: CurriculumCfg = field(default_factory=CurriculumCfg)
+    course: CourseCfg = field(default_factory=CourseCfg)
     scandots: ScandotsCfg = field(default_factory=ScandotsCfg)
     camera: CameraRigCfg = field(default_factory=CameraRigCfg)
     dr: DRCfg = field(default_factory=DRCfg)

@@ -156,6 +156,38 @@ if HAS_ISAAC:
             )
             self._cam_frame_cache: dict[str, torch.Tensor] = {}
 
+            # ── Course mode (shaped arenas + carrot goals) ────────────
+            # Rebuilds every course centerline from the variant id with the
+            # SAME deterministic layout function the terrain painter used —
+            # geometry is difficulty-invariant (harshness-only rows), so the
+            # variant (terrain column) alone identifies the path.
+            self._course = None
+            if getattr(x, "course", None) is not None and x.course.enabled:
+                from .course import CourseRuntime, build_layout
+                c = x.course
+                layouts = [
+                    build_layout(
+                        v, cell_size=c.cell_size, seg_len=c.seg_len,
+                        end_pad=c.end_pad, bend_pad=c.bend_pad,
+                        shapes=tuple(c.shapes), dense_step=c.dense_step,
+                        base_seed=c.layout_seed,
+                    )
+                    for v in range(c.n_variants)
+                ]
+                self._course = CourseRuntime(
+                    layouts, self.device, dense_step=c.dense_step
+                )
+                self._course_variant = torch.zeros(
+                    B, dtype=torch.long, device=self.device
+                )
+                self._course_dir = torch.zeros(
+                    B, dtype=torch.long, device=self.device
+                )
+                self._course_idx = torch.zeros(
+                    B, dtype=torch.long, device=self.device
+                )
+                self._course_frac = torch.zeros(B, device=self.device)
+
         # ── Small helpers ─────────────────────────────────────────────
         def _warn_once(self, key: str, msg: str):
             if key not in self._warned:
@@ -201,11 +233,16 @@ if HAS_ISAAC:
             # Curriculum BEFORE pose sampling (it moves env origins).
             # Uses the flags cached by _get_dones for these envs.
             if x.curriculum.enabled:
-                progress = torch.clamp(
-                    (self._init_dist[env_ids] - self._prev_dist[env_ids])
-                    / self._init_dist[env_ids].clamp(min=1e-6),
-                    0.0, 1.0,
-                )
+                if self._course is not None:
+                    # Arc-length fraction of the course completed — straight-
+                    # line distance is meaningless around an L/T bend.
+                    progress = self._course_frac[env_ids].clamp(0.0, 1.0)
+                else:
+                    progress = torch.clamp(
+                        (self._init_dist[env_ids] - self._prev_dist[env_ids])
+                        / self._init_dist[env_ids].clamp(min=1e-6),
+                        0.0, 1.0,
+                    )
                 at_goal = self._at_goal[env_ids]
                 fallen = self._fallen[env_ids]
                 cur = x.curriculum
@@ -237,9 +274,36 @@ if HAS_ISAAC:
             half = x.terrain.patch_half
 
             # ── Robot pose ────────────────────────────────────────────
-            local_xy = torch.empty(n, 2, device=self.device).uniform_(
-                -half, half
-            )
+            if self._course is not None:
+                # Course mode: spawn at a RANDOM END of this env's course
+                # (direction reversal) with jitter; yaw stays fully random
+                # below, so "forward" is never memorizable.
+                c = x.course
+                try:
+                    variant = self.scene.terrain.terrain_types[env_ids].long()
+                    variant = variant.clamp(0, c.n_variants - 1)
+                except (AttributeError, TypeError):
+                    variant = torch.zeros(
+                        n, dtype=torch.long, device=self.device
+                    )
+                direction = torch.randint(
+                    0, 2, (n,), device=self.device, dtype=torch.long
+                )
+                self._course_variant[env_ids] = variant
+                self._course_dir[env_ids] = direction
+                spawn_xy, idx0 = self._course.reset(
+                    variant, direction, env_origins[:, :2]
+                )
+                self._course_idx[env_ids] = idx0
+                self._course_frac[env_ids] = 0.0
+                jitter = torch.empty(n, 2, device=self.device).uniform_(
+                    -c.spawn_jitter, c.spawn_jitter
+                )
+                local_xy = spawn_xy + jitter - env_origins[:, :2]
+            else:
+                local_xy = torch.empty(n, 2, device=self.device).uniform_(
+                    -half, half
+                )
             yaw = torch.empty(n, device=self.device).uniform_(
                 0.0, 2 * math.pi
             )
@@ -262,20 +326,36 @@ if HAS_ISAAC:
             )
 
             # ── Goal ──────────────────────────────────────────────────
-            d = torch.empty(n, device=self.device).uniform_(
-                *x.goal.dist_range
-            )
-            ang = torch.empty(n, device=self.device).uniform_(
-                0.0, 2 * math.pi
-            )
-            goal_local = (local_xy + torch.stack(
-                [d * torch.cos(ang), d * torch.sin(ang)], dim=-1
-            )).clamp(-half, half)
-            goal_world = env_origins[:, :2] + goal_local
-            self._goal[env_ids] = goal_world
-            dist0 = torch.linalg.norm(
-                goal_world - (env_origins[:, :2] + local_xy), dim=-1
-            )
+            if self._course is not None:
+                # Initial carrot: `lookahead` m along the path from spawn.
+                # The carrot clamps at the course end, so goal_tol/goal_bonus
+                # can only fire at the true finish.
+                spawn_world = env_origins[:, :2] + local_xy
+                new_idx, carrot, _ = self._course.advance(
+                    self._course_variant[env_ids],
+                    self._course_dir[env_ids],
+                    self._course_idx[env_ids],
+                    env_origins[:, :2], spawn_world,
+                    x.course.lookahead, x.course.window,
+                )
+                self._course_idx[env_ids] = new_idx
+                self._goal[env_ids] = carrot
+                dist0 = torch.linalg.norm(carrot - spawn_world, dim=-1)
+            else:
+                d = torch.empty(n, device=self.device).uniform_(
+                    *x.goal.dist_range
+                )
+                ang = torch.empty(n, device=self.device).uniform_(
+                    0.0, 2 * math.pi
+                )
+                goal_local = (local_xy + torch.stack(
+                    [d * torch.cos(ang), d * torch.sin(ang)], dim=-1
+                )).clamp(-half, half)
+                goal_world = env_origins[:, :2] + goal_local
+                self._goal[env_ids] = goal_world
+                dist0 = torch.linalg.norm(
+                    goal_world - (env_origins[:, :2] + local_xy), dim=-1
+                )
             self._prev_dist[env_ids] = dist0
             self._init_dist[env_ids] = dist0.clamp(min=1e-6)
 
@@ -497,6 +577,19 @@ if HAS_ISAAC:
         def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._x
             robot = self.scene["robot"]
+            # Course mode: advance the carrot BEFORE termination/reward so
+            # both see the current goal. Monotonic path projection prevents
+            # backtracking/reward-farming; the carrot clamps at the end.
+            if self._course is not None:
+                self._course_idx, carrot, self._course_frac = (
+                    self._course.advance(
+                        self._course_variant, self._course_dir,
+                        self._course_idx, self.scene.env_origins[:, :2],
+                        robot.data.root_pos_w[:, :2],
+                        x.course.lookahead, x.course.window,
+                    )
+                )
+                self._goal = carrot
             self._update_height_scan()
             fallen, at_goal, timeout = check_termination(
                 x.reward,
