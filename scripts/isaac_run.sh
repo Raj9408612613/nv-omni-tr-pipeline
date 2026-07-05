@@ -192,16 +192,31 @@ else
     echo "    IsaacLab already cloned at $ISAACLAB_DIR"
 fi
 
-if python -c "import isaaclab" 2>/dev/null; then
-    echo "    isaaclab already importable"
+# Each Isaac Lab piece is checked and installed INDEPENDENTLY. The old version
+# wrapped core+deps+assets+tasks in ONE `import isaaclab` guard: with set -e,
+# a pip failure halfway through the block aborted the script AFTER the core -e
+# install had already linked, so every later run saw "isaaclab already
+# importable" and skipped the missing deps/assets/tasks forever. A bare
+# `import isaaclab` also succeeds without its deps, so it proves nothing —
+# the probe below imports what train.py actually needs (isaaclab.app).
+if python -c "from isaaclab.app import AppLauncher" 2>/dev/null; then
+    echo "    isaaclab core already importable (AppLauncher OK)"
 else
-    pushd "$ISAACLAB_DIR" >/dev/null
-    pip install --no-deps -e source/isaaclab
-    pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
-        prettytable==3.3.0 flatdict
-    pip install --use-deprecated=legacy-resolver -e source/isaaclab_assets
-    pip install --use-deprecated=legacy-resolver -e source/isaaclab_tasks
-    popd >/dev/null
+    pip install --no-deps -e "$ISAACLAB_DIR/source/isaaclab"
+fi
+# Deps are cheap no-ops when already satisfied — run them UNconditionally so a
+# partially-installed env self-heals instead of being skipped past.
+pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
+    prettytable==3.3.0 flatdict
+if python -c "import isaaclab_assets" 2>/dev/null; then
+    echo "    isaaclab_assets already importable"
+else
+    pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_assets"
+fi
+if python -c "import isaaclab_tasks" 2>/dev/null; then
+    echo "    isaaclab_tasks already importable"
+else
+    pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_tasks"
 fi
 pip install tensorboard "imageio[ffmpeg]" h5py
 
@@ -214,9 +229,15 @@ pip install tensorboard "imageio[ffmpeg]" h5py
 echo ">>> Re-verifying torch CUDA arch after Isaac install"
 ensure_torch
 
+# Hard verify — ABORT here if the install is broken. The old `|| echo FAILED`
+# swallowed the error, so the script rolled into Stage 5 and exited 0 with a
+# broken env; the failure was buried mid-log. The AppLauncher import is the
+# exact path train_pbt.py takes, so passing here means training can launch.
 echo "    import check:"
-python -c "import isaacsim; print('      isaacsim OK')" || echo "      isaacsim FAILED"
-python -c "import isaaclab; print('      isaaclab OK')" || echo "      isaaclab FAILED"
+python -c "import isaacsim; print('      isaacsim OK')" \
+    || { echo "      isaacsim FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
+python -c "from isaaclab.app import AppLauncher; print('      isaaclab OK (AppLauncher importable)')" \
+    || { echo "      isaaclab FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
 
 # =============================================================================
 # Stage 5 — smoke tests + (optional) full teacher training

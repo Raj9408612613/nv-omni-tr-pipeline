@@ -29,6 +29,9 @@ pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_a
 pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_tasks"
 pip install tensorboard "imageio[ffmpeg]" h5py
 
+# AppLauncher is the exact import train_pbt.py needs — a bare `import
+# isaaclab` can pass on a half-broken install, this can't. set -e makes any
+# failure here abort with nonzero exit.
 python -c "import isaacsim; print('isaacsim OK')"
-python -c "import isaaclab;  print('isaaclab OK')"
+python -c "from isaaclab.app import AppLauncher; print('isaaclab OK (AppLauncher importable)')"
 echo ">>> Isaac Lab install complete."
