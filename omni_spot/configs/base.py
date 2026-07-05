@@ -92,6 +92,13 @@ class RewardWeightsCfg:
 class GoalCfg:
     dist_range: tuple[float, float] = (1.5, 3.5)  # m from spawn
     episode_len_steps: int = 1000
+    # Half-width (m) of the square around the patch CENTER spawns are sampled
+    # from. None = the full usable patch (original behavior). legged_gym spawns
+    # at origin ±1 m; a small value keeps spawns on the stair pyramids' center
+    # platform where the env-origin z is valid — spawn z is origin.z +
+    # init_height, so full-patch spawns on tall stair rows drop (pyramid up)
+    # or bury (pyramid down) the robot by up to the apex height.
+    spawn_half: float | None = None
 
 
 @dataclass
@@ -440,6 +447,12 @@ class PBTCfg:
     progress_w_range: tuple[float, float] = (10.0, 100.0)
     vel_track_w_range: tuple[float, float] = (0.5, 3.0)
     goal_bonus_range: tuple[float, float] = (10.0, 50.0)
+    # Get-up gradient (Round-1 robustness). A DEGENERATE range (lo >= hi)
+    # means "pinned": the knob is NOT searched — every member holds the
+    # config's cfg.reward.recover_w and perturbation never touches it. This
+    # is the default so spot / spot_hard / spot_parkour keep recover_w
+    # exactly as configured; robustness configs opt in with a real range.
+    recover_w_range: tuple[float, float] = (0.0, 0.0)
     # PPO-knob ranges.
     clip_eps_range: tuple[float, float] = (0.1, 0.3)
     ent_coef_range: tuple[float, float] = (0.0, 0.02)

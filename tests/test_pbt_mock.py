@@ -285,6 +285,38 @@ def test_knob_fitness_correlation_runs():
         assert (v != v) or (-1.0 - 1e-9 <= v <= 1.0 + 1e-9)
 
 
+def test_recover_w_pinned_by_default_searched_when_ranged():
+    # Default PBTCfg: recover_w range is degenerate -> pinned to cfg.reward
+    # value (0.0 for spot), never perturbed.
+    _, pop, _ = _make_pop_env(seed=3)
+    assert all(m.knobs["recover_w"] == 0.0 for m in pop.members)
+    for m in pop.members:
+        pop._perturb_knobs(m)
+    assert all(m.knobs["recover_w"] == 0.0 for m in pop.members)
+
+    # Robust-style config: a real range -> sampled within it, diversified,
+    # tiled per env, and perturbations stay in range.
+    cfg = _cfg()
+    cfg.reward.recover_w = 0.5
+    cfg.pbt.recover_w_range = (0.15, 1.5)
+    pop2 = Population(
+        cfg, n_members=N_MEMBERS, envs_per_member=ENVS_PER_MEMBER,
+        device="cpu", seed=4,
+    )
+    vals = [m.knobs["recover_w"] for m in pop2.members]
+    assert all(0.15 <= v <= 1.5 for v in vals)
+    assert len({round(v, 9) for v in vals}) > 1, "recover_w not diversified"
+    rw = pop2.reward_weights.recover_w
+    for m in pop2.members:
+        sl = pop2.member_slice(m.id)
+        assert torch.allclose(
+            rw[sl], torch.full((ENVS_PER_MEMBER,), m.knobs["recover_w"])
+        )
+    for m in pop2.members:
+        pop2._perturb_knobs(m)
+        assert 0.15 <= m.knobs["recover_w"] <= 1.5
+
+
 if __name__ == "__main__":
     failures = 0
     tests = [(n, f) for n, f in sorted(globals().items())

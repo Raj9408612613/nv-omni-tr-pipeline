@@ -53,19 +53,26 @@ from .ppo import PPOTrainer
 # fixed (they map to RewardWeightsCfg fields + PPO hyperparams); the RANGES are
 # per-robot and read from cfg.pbt (PBTCfg) via knob_ranges().
 REWARD_KNOBS: tuple[str, ...] = (
-    "alive_bonus", "progress_w", "vel_track_w", "goal_bonus"
+    "alive_bonus", "progress_w", "vel_track_w", "goal_bonus", "recover_w"
 )
 PPO_KNOBS: tuple[str, ...] = ("clip_eps", "ent_coef", "lr")
 KNOB_NAMES: tuple[str, ...] = REWARD_KNOBS + PPO_KNOBS
 
 
 def knob_ranges(pbt: PBTCfg) -> dict[str, tuple[float, float]]:
-    """Map each knob name to its (lo, hi) range from a PBTCfg."""
+    """Map each knob name to its (lo, hi) range from a PBTCfg.
+
+    A DEGENERATE range (lo >= hi) marks the knob as PINNED: it is not
+    searched — every member holds the config's scalar value (cfg.reward.<knob>
+    for reward knobs) and perturbation skips it. recover_w defaults to pinned
+    so non-robustness configs keep their configured value untouched.
+    """
     return {
         "alive_bonus": pbt.alive_bonus_range,
         "progress_w": pbt.progress_w_range,
         "vel_track_w": pbt.vel_track_w_range,
         "goal_bonus": pbt.goal_bonus_range,
+        "recover_w": pbt.recover_w_range,
         "clip_eps": pbt.clip_eps_range,
         "ent_coef": pbt.ent_coef_range,
         "lr": pbt.lr_range,
@@ -213,10 +220,18 @@ class Population:
             self._weight_tensors[knob][sl] = float(knobs[knob])
 
     # ── initial knob sampling ─────────────────────────────────────────
+    def _pinned_value(self, knob: str) -> float:
+        """Value a pinned (degenerate-range) knob holds: the config scalar."""
+        if knob in REWARD_KNOBS:
+            return float(getattr(self.cfg.reward, knob))
+        return float(self._ranges[knob][0])
+
     def _sample_initial_knobs(self) -> dict[str, float]:
         knobs: dict[str, float] = {}
         for knob, (lo, hi) in self._ranges.items():
-            if knob == "lr":
+            if hi <= lo:
+                knobs[knob] = self._pinned_value(knob)
+            elif knob == "lr":
                 lo_l = math.log(max(lo, 1e-12))
                 knobs[knob] = math.exp(self.rng.uniform(lo_l, math.log(hi)))
             elif knob == "ent_coef":
@@ -410,6 +425,8 @@ class Population:
 
     def _perturb_knobs(self, m: Member) -> None:
         for knob, (lo, hi) in self._ranges.items():
+            if hi <= lo:  # pinned knob: never perturbed, never clamped to 0
+                continue
             factor = self.rng.choice(self._perturb_factors)
             m.knobs[knob] = _clamp(m.knobs[knob] * factor, lo, hi)
 
@@ -476,7 +493,12 @@ class Population:
             )
             m.trainer._ret_mean = float(ms["ret_mean"])
             m.trainer._ret_std = float(ms["ret_std"])
-            m.knobs = {k: float(ms["knobs"][k]) for k in KNOB_NAMES}
+            # Knobs added after a checkpoint was written (e.g. recover_w)
+            # fall back to a fresh sample — pinned knobs get the config value.
+            fresh = self._sample_initial_knobs()
+            m.knobs = {
+                k: float(ms["knobs"].get(k, fresh[k])) for k in KNOB_NAMES
+            }
             m.fitness = float(ms.get("fitness", float("-inf")))
             m.fitness_history = list(ms.get("fitness_history", []))
         # Restore slice ownership AND per-env weight tiling, not just weights.

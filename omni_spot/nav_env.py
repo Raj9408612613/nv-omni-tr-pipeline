@@ -301,8 +301,14 @@ if HAS_ISAAC:
                 )
                 local_xy = spawn_xy + jitter - env_origins[:, :2]
             else:
+                # spawn_half (when set) confines spawns near the patch center
+                # — on stair patches that is the pyramid platform, the only
+                # place where env-origin z (used for spawn height) matches the
+                # terrain. Goals still range over the whole patch.
+                s_half = (half if x.goal.spawn_half is None
+                          else min(x.goal.spawn_half, half))
                 local_xy = torch.empty(n, 2, device=self.device).uniform_(
-                    -half, half
+                    -s_half, s_half
                 )
             yaw = torch.empty(n, device=self.device).uniform_(
                 0.0, 2 * math.pi
