@@ -191,6 +191,18 @@ class _Csv:
         self.f.close()
 
 
+def _member_comp(stat: dict, key: str) -> float:
+    """One member's rollout-mean of a reward component / env extra (nan if
+    the env doesn't emit it, e.g. terrain_level on the mock env)."""
+    return stat["_diag"].get("reward_components", {}).get(key, float("nan"))
+
+
+def _pop_comp(stats: list, key: str) -> float:
+    """Population mean of a per-member component, ignoring nan members."""
+    vals = [v for s in stats if (v := _member_comp(s, key)) == v]
+    return sum(vals) / len(vals) if vals else float("nan")
+
+
 def _build_env(cfg, total_envs: int, device: str, mock: bool):
     if mock:
         from .mock_env import MockEnv
@@ -263,10 +275,21 @@ def main() -> int:
     log = _Csv(os.path.join(out_dir, "train_log.csv"), [
         "update", "timesteps", "wall_time", "rollout_sec", "update_sec", "sps",
         "rew_mean_pop", "rew_min_pop", "rew_max_pop", "done_rate_pop",
+        # Curriculum / robustness signals (population rollout means; nan when
+        # the env doesn't emit them, e.g. mock runs):
+        #   terrain_level_pop — mean curriculum row; should CLIMB over a run.
+        #   fallen_frac_pop   — fraction of steps spent fallen (falls only);
+        #                       the get-up metric, should DROP.
+        #   r_recover_pop / r_vel_track_pop — recovery gradient vs goal drive;
+        #                       vel_track collapsing to ~0 = stand-still trap.
+        #   dist_goal_pop     — mean live distance-to-goal over the rollout.
+        "terrain_level_pop", "fallen_frac_pop", "r_recover_pop",
+        "r_vel_track_pop", "dist_goal_pop",
         "best_fitness", "mean_fitness", "vram_alloc_gb",
     ])
     members_csv = _Csv(os.path.join(out_dir, "pbt_members.csv"), [
         "update", "member_id", "fitness", "success_rate", "mean_final_dist",
+        "terrain_level", "fallen_frac",
         *KNOB_NAMES,
     ])
     events_csv = _Csv(os.path.join(out_dir, "pbt_events.csv"), [
@@ -308,6 +331,9 @@ def main() -> int:
         rew_mins = [s["rew_min"] for s in stats]
         rew_maxs = [s["rew_max"] for s in stats]
         done_rates = [s["done_rate"] for s in stats]
+        terrain_pop = _pop_comp(stats, "terrain_level")
+        fallen_pop = _pop_comp(stats, "fallen")
+        recover_pop = _pop_comp(stats, "r_recover")
         vram = (torch.cuda.memory_allocated() / 2**30
                 if torch.cuda.is_available() else 0.0)
         log.row({
@@ -317,25 +343,42 @@ def main() -> int:
             "rew_mean_pop": sum(rew_means) / len(rew_means),
             "rew_min_pop": min(rew_mins), "rew_max_pop": max(rew_maxs),
             "done_rate_pop": sum(done_rates) / len(done_rates),
+            "terrain_level_pop": terrain_pop,
+            "fallen_frac_pop": fallen_pop,
+            "r_recover_pop": recover_pop,
+            "r_vel_track_pop": _pop_comp(stats, "r_vel_track"),
+            "dist_goal_pop": _pop_comp(stats, "dist_goal"),
             "best_fitness": best_fitness, "mean_fitness": mean_fitness,
             "vram_alloc_gb": vram,
         })
 
         if update % args.log_interval == 0:
+            # terr/fall/rec are omitted when the env doesn't emit them (mock).
+            extra = ""
+            if terrain_pop == terrain_pop:
+                extra += f"terr={terrain_pop:.2f}  "
+            if fallen_pop == fallen_pop:
+                extra += f"fall={fallen_pop:.3f}  "
+            if recover_pop == recover_pop:
+                extra += f"rec={recover_pop:+.3f}  "
             print(f"[{update:5d}/{last_updates}] "
                   f"rew(pop μ)={sum(rew_means)/len(rew_means):7.3f}  "
-                  f"done={sum(done_rates)/len(done_rates):.3f}  "
+                  f"done={sum(done_rates)/len(done_rates):.3f}  {extra}"
                   f"best_fit={best_fitness:.3f}  sps={sps:,.0f}", flush=True)
 
         if update == start_update + 1:
             report_gpu_memory("after update 1")
 
         # ── Sanity (plan Phase 5): top member's reward-component mix ────
-        if update % 200 == 0:
+        # r_recover / r_ang_vel / r_upright are the Round-1 robustness terms:
+        # r_recover should trend up toward its ceiling (recover_w) and
+        # r_vel_track must STAY positive (collapse = stand-still trap).
+        if update % 100 == 0:
             top = pop.top_member()
             comps = stats[top.id]["_diag"].get("reward_components", {})
             mix = "  ".join(f"{k}={comps.get(k, float('nan')):+.3f}"
-                            for k in ("r_alive", "r_goal", "r_vel_track"))
+                            for k in ("r_alive", "r_goal", "r_vel_track",
+                                      "r_recover", "r_ang_vel", "r_upright"))
             print(f"    [sanity] top member {top.id} components: {mix}",
                   flush=True)
 
@@ -354,6 +397,8 @@ def main() -> int:
                     "update": update, "member_id": m.id, "fitness": m.fitness,
                     "success_rate": m.success_rate,
                     "mean_final_dist": m.mean_final_dist,
+                    "terrain_level": _member_comp(stats[m.id], "terrain_level"),
+                    "fallen_frac": _member_comp(stats[m.id], "fallen"),
                     **{k: m.knobs[k] for k in KNOB_NAMES},
                 })
             for ev in events:

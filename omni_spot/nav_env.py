@@ -615,6 +615,7 @@ if HAS_ISAAC:
             else:
                 collided = torch.zeros_like(fallen)
             self._fallen = fallen | collided  # demotes via the curriculum
+            self._fallen_raw = fallen  # falls only (no collisions) → extras
             self._at_goal = at_goal
             # "Rebalance instead of terminate": when terminate_on_fall is off
             # (Round-1 robustness), a fall does NOT end the episode — the robot
@@ -677,6 +678,14 @@ if HAS_ISAAC:
                 )
             except (AttributeError, TypeError):
                 pass
+            # Fall-rate signal for the robustness rounds: fraction of steps
+            # spent fallen (falls only — collisions excluded). With
+            # terminate_on_fall=False this is the get-up metric: it should
+            # DROP as recovery is learned, while done_rate no longer sees
+            # falls at all.
+            fallen_raw = getattr(self, "_fallen_raw", None)
+            if fallen_raw is not None:
+                self.extras["fallen"] = fallen_raw.float()
             return reward
 
         # ── Observations ──────────────────────────────────────────────
