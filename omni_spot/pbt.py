@@ -238,6 +238,10 @@ class Population:
         adapt_losses: list[list[float]] = [[] for _ in range(M)]
         reward_sums: list[dict | None] = [None for _ in range(M)]
         reward_count = 0
+        # Per-ROLLOUT success counters (fresh each update, unlike the
+        # fitness-window m.ep_count/m.goal_count) — feed the `succ=` column.
+        roll_eps = [0] * M
+        roll_goals = [0] * M
 
         for step in range(n_steps):
             actions = []
@@ -293,8 +297,11 @@ class Population:
                 n_done = int(done_m.sum())
                 if n_done > 0:
                     m.ep_count += n_done
+                    roll_eps[m.id] += n_done
                     if at_goal is not None:
-                        m.goal_count += int((at_goal[sl] & done_m).sum())
+                        n_goal = int((at_goal[sl] & done_m).sum())
+                        m.goal_count += n_goal
+                        roll_goals[m.id] += n_goal
                     if dist_goal is not None:
                         m.final_dist_sum += float(dist_goal[sl][done_m].sum())
             reward_count += 1
@@ -308,6 +315,8 @@ class Population:
                 bufs[m.id], last_value, adapt_losses[m.id],
                 reward_sums[m.id], reward_count, None,
             )
+            st["roll_eps"] = roll_eps[m.id]
+            st["roll_goals"] = roll_goals[m.id]
             batches.append(batch)
             stats.append(st)
         return obs, batches, stats

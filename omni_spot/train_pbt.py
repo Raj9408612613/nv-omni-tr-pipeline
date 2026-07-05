@@ -283,8 +283,10 @@ def main() -> int:
         #   r_recover_pop / r_vel_track_pop — recovery gradient vs goal drive;
         #                       vel_track collapsing to ~0 = stand-still trap.
         #   dist_goal_pop     — mean live distance-to-goal over the rollout.
+        #   succ_rate_pop     — goals reached / episodes ended THIS rollout
+        #                       (noisy: few episodes end per 24-step window).
         "terrain_level_pop", "fallen_frac_pop", "r_recover_pop",
-        "r_vel_track_pop", "dist_goal_pop",
+        "r_vel_track_pop", "dist_goal_pop", "succ_rate_pop",
         "best_fitness", "mean_fitness", "vram_alloc_gb",
     ])
     members_csv = _Csv(os.path.join(out_dir, "pbt_members.csv"), [
@@ -334,6 +336,11 @@ def main() -> int:
         terrain_pop = _pop_comp(stats, "terrain_level")
         fallen_pop = _pop_comp(stats, "fallen")
         recover_pop = _pop_comp(stats, "r_recover")
+        # Per-rollout success: goals / episodes ended THIS update (fresh each
+        # window, unlike the PBT fitness counters). nan when no episode ended.
+        roll_eps = sum(s.get("roll_eps", 0) for s in stats)
+        roll_goals = sum(s.get("roll_goals", 0) for s in stats)
+        succ_pop = roll_goals / roll_eps if roll_eps > 0 else float("nan")
         vram = (torch.cuda.memory_allocated() / 2**30
                 if torch.cuda.is_available() else 0.0)
         log.row({
@@ -348,12 +355,14 @@ def main() -> int:
             "r_recover_pop": recover_pop,
             "r_vel_track_pop": _pop_comp(stats, "r_vel_track"),
             "dist_goal_pop": _pop_comp(stats, "dist_goal"),
+            "succ_rate_pop": succ_pop,
             "best_fitness": best_fitness, "mean_fitness": mean_fitness,
             "vram_alloc_gb": vram,
         })
 
         if update % args.log_interval == 0:
-            # terr/fall/rec are omitted when the env doesn't emit them (mock).
+            # terr/fall/rec/succ are omitted when the env doesn't emit them
+            # (mock) or no episode ended in this rollout window (succ).
             extra = ""
             if terrain_pop == terrain_pop:
                 extra += f"terr={terrain_pop:.2f}  "
@@ -361,6 +370,8 @@ def main() -> int:
                 extra += f"fall={fallen_pop:.3f}  "
             if recover_pop == recover_pop:
                 extra += f"rec={recover_pop:+.3f}  "
+            if succ_pop == succ_pop:
+                extra += f"succ={succ_pop:.3f}  "
             print(f"[{update:5d}/{last_updates}] "
                   f"rew(pop μ)={sum(rew_means)/len(rew_means):7.3f}  "
                   f"done={sum(done_rates)/len(done_rates):.3f}  {extra}"
