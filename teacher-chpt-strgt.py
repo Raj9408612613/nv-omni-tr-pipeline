@@ -464,15 +464,23 @@ def main() -> int:
             print(f"[CAM][WARN] auto-frame failed ({e}); using cfg pose "
                   f"(tune --cam_pos/--cam_look)", flush=True)
 
-    # Per-course tallies.
+    # Per-course tallies. NOTE: with terminate_on_fall=False, episodes only
+    # end at the goal (or the --episode_s timeout, step episode_s*50) — run
+    # at least ~2.5x episode_s*50 steps if you want every attempt scored.
     goals = torch.zeros(2, device=device)
-    falls = torch.zeros(2, device=device)
+    fall_events = torch.zeros(2, device=device)   # rising edges, not steps
     timeouts = torch.zeros(2, device=device)
     episodes = torch.zeros(2, device=device)
+    prev_fallen = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
+    best_frac = torch.zeros(args.num_envs, device=device)  # per-attempt max
+
+    start_x = env._course_start_xy[:, 0]
+    span_x = (env._course_end_x - start_x).clamp(min=1e-6)
 
     frames: list[np.ndarray] = []
 
-    print(f"[RUN] {args.steps} steps x {args.num_envs} robots...", flush=True)
+    print(f"[RUN] {args.steps} steps x {args.num_envs} robots "
+          f"(timeout at step {int(args.episode_s * 50)})...", flush=True)
     with torch.no_grad():
         for it in range(1, args.steps + 1):
             action = teacher.act_mean(
@@ -481,10 +489,16 @@ def main() -> int:
             obs, _r, terminated, truncated, _i = env.step(action)
 
             done = terminated | truncated
+            fell_now = env._fallen & ~prev_fallen      # new falls this step
+            prev_fallen = env._fallen.clone()
+            px = env.scene["robot"].data.root_pos_w[:, 0]
+            frac = ((px - start_x) / span_x).clamp(0.0, 1.0)
+            best_frac = torch.maximum(best_frac, frac)
+            best_frac[done] = 0.0                      # new attempt starts
             for c in (0, 1):
                 m = course_id == c
                 goals[c] += (env._at_goal & m).sum()
-                falls[c] += (env._fallen & m).sum()
+                fall_events[c] += (fell_now & m).sum()
                 timeouts[c] += (truncated & ~terminated & m).sum()
                 episodes[c] += (done & m).sum()
 
@@ -501,32 +515,47 @@ def main() -> int:
             if it % 100 == 0:
                 g, e = int(goals.sum()), int(episodes.sum())
                 sr = g / max(1, e)
+                down = int(env._fallen.sum())
+                fr = [float(frac[course_id == c].mean()) for c in (0, 1)]
                 print(f"  [{it}/{args.steps}] episodes={e} goals={g} "
-                      f"falls={int(falls.sum())} timeouts={int(timeouts.sum())} "
-                      f"success={sr:.3f}", flush=True)
+                      f"falls={int(fall_events.sum())} down_now={down} "
+                      f"timeouts={int(timeouts.sum())} success={sr:.3f} "
+                      f"| progress c1={fr[0]:.2f} c2={fr[1]:.2f}", flush=True)
 
     # ── Report ───────────────────────────────────────────────────────────
     def _line(label, c):
         e = int(episodes[c])
         sr = int(goals[c]) / max(1, e)
+        m = course_id == c
+        unfinished = m & (best_frac > 0.0)
+        bf = best_frac[unfinished]
+        prog = (f"unfinished: n={int(unfinished.sum())} "
+                f"best_frac mean={float(bf.mean()):.2f} "
+                f"min={float(bf.min()):.2f} max={float(bf.max()):.2f}"
+                if int(unfinished.sum()) > 0 else "unfinished: none")
         return (f"  {label:9s}: episodes={e:4d} goals={int(goals[c]):4d} "
-                f"falls={int(falls[c]):4d} timeouts={int(timeouts[c]):4d} "
-                f"success={sr:.3f}")
+                f"fall_events={int(fall_events[c]):4d} "
+                f"timeouts={int(timeouts[c]):4d} success={sr:.3f}\n"
+                f"             {prog}")
 
     tot_e = int(episodes.sum())
     tot_sr = int(goals.sum()) / max(1, tot_e)
+    down_end = int(env._fallen.sum())
     report = "\n".join([
         f"checkpoint     : {args.ckpt}",
         f"phase          : {ckpt.get('phase')}  (TEACHER test-course eval)",
-        f"robots x steps : {args.num_envs} x {args.steps}",
+        f"robots x steps : {args.num_envs} x {args.steps} "
+        f"(timeout at step {int(args.episode_s * 50)})",
         f"exteroception  : scandots + analytic course compositing "
         f"({len(terrain)} cuboids)",
         f"domain_rand    : {bool(args.domain_rand)}",
         f"course 1 segs  : {COURSE_SEGMENTS[0]}",
         f"course 2 segs  : {COURSE_SEGMENTS[1]}",
-        "per-course (success = reached the green goal at the course end):",
+        "per-course (success = reached the green goal at the course end;",
+        " best_frac = furthest point reached along the course, this attempt):",
         _line("course 1", 0),
         _line("course 2", 1),
+        f"fallen at end  : {down_end} robots still down when the run ended",
         f"OVERALL        : episodes={tot_e} SUCCESS RATE={tot_sr:.3f}",
     ])
     print("\n" + report, flush=True)
