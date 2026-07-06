@@ -170,6 +170,7 @@ def _set_fitness_inputs(m, success: float, dist: float, ep: int = 40):
     m.ep_count = ep
     m.goal_count = int(round(success * ep))
     m.final_dist_sum = dist * ep
+    m.final_dist_count = ep
 
 
 def test_evolve_exploits_best_and_perturbs():

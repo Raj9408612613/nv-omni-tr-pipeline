@@ -114,6 +114,7 @@ class Member:
         self.ep_count: int = 0
         self.goal_count: int = 0
         self.final_dist_sum: float = 0.0
+        self.final_dist_count: int = 0  # dones with a valid prev-step dist
         # Last computed components (for logging / contamination guard).
         self.success_rate: float = float("nan")
         self.mean_final_dist: float = float("nan")
@@ -135,6 +136,7 @@ class Member:
         self.ep_count = 0
         self.goal_count = 0
         self.final_dist_sum = 0.0
+        self.final_dist_count = 0
 
 
 class Population:
@@ -178,6 +180,10 @@ class Population:
         self._weight_tensors: dict[str, torch.Tensor] = {}
         self._reward_weights = None
         self.build_reward_weights()
+        # Previous step's per-env goal distance — the pre-reset reading used
+        # for final_dist accounting (see collect_rollouts). None until the
+        # first step ever.
+        self._last_dist: torch.Tensor | None = None
 
     # ── layout helpers ────────────────────────────────────────────────
     @property
@@ -284,6 +290,14 @@ class Population:
             done_f = done.float()
             at_goal = getattr(env, "_at_goal", None)
             dist_goal = info.get("dist_goal", None)
+            # Final distance for envs ending THIS step comes from the PREVIOUS
+            # step's reading (self._last_dist), not this step's: measured
+            # mean_final_dist tracked the mean INITIAL goal distance (~2.2 m
+            # on 1.5-3.5 m goals, ~4.8 m on 3-7 m goals), i.e. the done-step
+            # extras already reflect the post-reset resampled goal. One
+            # control step (~0.03 m) before the terminal state is the honest
+            # pre-reset distance under either env ordering.
+            dist_prev = self._last_dist
 
             for m in self.members:
                 sl = self.member_slice(m.id)
@@ -317,8 +331,11 @@ class Population:
                         n_goal = int((at_goal[sl] & done_m).sum())
                         m.goal_count += n_goal
                         roll_goals[m.id] += n_goal
-                    if dist_goal is not None:
-                        m.final_dist_sum += float(dist_goal[sl][done_m].sum())
+                    if dist_prev is not None:
+                        m.final_dist_sum += float(dist_prev[sl][done_m].sum())
+                        m.final_dist_count += n_done
+            if dist_goal is not None:
+                self._last_dist = dist_goal
             reward_count += 1
 
         batches, stats = [], []
@@ -367,8 +384,15 @@ class Population:
             m.mean_final_dist = float("nan")
             return float("-inf")
         m.success_rate = m.goal_count / m.ep_count
-        m.mean_final_dist = m.final_dist_sum / m.ep_count
-        return m.success_rate - self.fitness_dist_weight * m.mean_final_dist
+        # Denominator = dones that had a valid prev-step distance (the very
+        # first step of the very first rollout has none).
+        if m.final_dist_count > 0:
+            m.mean_final_dist = m.final_dist_sum / m.final_dist_count
+            dist_term = m.mean_final_dist
+        else:
+            m.mean_final_dist = float("nan")
+            dist_term = 0.0
+        return m.success_rate - self.fitness_dist_weight * dist_term
 
     # ── exploit / explore ─────────────────────────────────────────────
     def evolve(self) -> list[dict]:
