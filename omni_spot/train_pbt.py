@@ -66,12 +66,13 @@ class _Phase:
 # ── Args ─────────────────────────────────────────────────────────────────────
 _parser = argparse.ArgumentParser(description="Population-Based Training teacher")
 _parser.add_argument("--robot", type=str, default="spot")
-_parser.add_argument("--pop_size", type=int, default=24)
-_parser.add_argument("--envs_per_member", type=int, default=2048)
+# None => use the per-robot cfg.pbt value (PBTCfg); CLI overrides when given.
+_parser.add_argument("--pop_size", type=int, default=None)
+_parser.add_argument("--envs_per_member", type=int, default=None)
 _parser.add_argument("--total_updates", type=int, default=1500)
-_parser.add_argument("--pbt_interval", type=int, default=50)
-_parser.add_argument("--pbt_warmup", type=int, default=100)
-_parser.add_argument("--fitness_dist_weight", type=float, default=0.1)
+_parser.add_argument("--pbt_interval", type=int, default=None)
+_parser.add_argument("--pbt_warmup", type=int, default=None)
+_parser.add_argument("--fitness_dist_weight", type=float, default=None)
 _parser.add_argument("--update_mode", choices=["loop", "vmap"], default="loop",
                      help="loop = sequential per-member PPO (reference); "
                           "vmap = batched functional_call+vmap update")
@@ -90,33 +91,52 @@ _parser.add_argument("--vram_probe", type=int, default=0, metavar="N",
 # CPU smoke path (no Isaac Lab).
 _parser.add_argument("--mock", action="store_true",
                      help="Use the pure-PyTorch MockEnv (no Isaac Sim)")
-_parser.add_argument("--device", type=str, default="cuda")
+# NOTE: --device is provided by AppLauncher.add_app_launcher_args for real runs
+# (adding it here would collide). It is only added manually in the mock branch.
 
 # ── Launch Isaac Sim BEFORE importing Isaac Lab sub-modules (unless --mock) ──
-_HAS_APP = False
-try:
-    from isaaclab.app import AppLauncher
-    _HAS_APP = True
-except ImportError:
+# Decide mock from argv up front: in mock mode we must NOT touch Isaac at all.
+_WANT_MOCK = "--mock" in sys.argv
+AppLauncher = None
+_app_import_errs = None
+if not _WANT_MOCK:
     try:
-        from omni.isaac.lab.app import AppLauncher
-        _HAS_APP = True
-    except ImportError:
-        AppLauncher = None
+        from isaaclab.app import AppLauncher            # Isaac Lab 2.x
+    except Exception as _e1:  # noqa: BLE001 — surface the real cause below
+        try:
+            from omni.isaac.lab.app import AppLauncher  # Isaac Lab 1.x
+        except Exception as _e2:  # noqa: BLE001
+            _app_import_errs = (_e1, _e2)
 
-if _HAS_APP:
+if AppLauncher is not None:
     AppLauncher.add_app_launcher_args(_parser)
 else:
-    # Keep --headless accepted even when Isaac Lab is absent (mock runs).
+    # --mock path (or Isaac missing): keep these flags accepted so the parser
+    # does not choke on them, and supply --device (AppLauncher would otherwise).
     _parser.add_argument("--headless", action="store_true")
+    _parser.add_argument("--enable_cameras", action="store_true")
+    _parser.add_argument("--device", type=str, default="cpu")
 
 args = _parser.parse_args()
 
 simulation_app = None
 if not args.mock:
-    if not _HAS_APP:
-        print("[ERROR] Isaac Lab not found and --mock not set. Install Isaac "
-              "Lab or pass --mock for the CPU smoke path.", flush=True)
+    if AppLauncher is None:
+        print("[ERROR] Could not import Isaac Lab (tried isaaclab.app and "
+              "omni.isaac.lab.app). This is an ENVIRONMENT problem, not a "
+              "train_pbt bug — `python -c \"import isaaclab\"` and train.py "
+              "will fail the same way.", flush=True)
+        if _app_import_errs is not None:
+            print(f"        isaaclab.app      -> "
+                  f"{type(_app_import_errs[0]).__name__}: {_app_import_errs[0]}",
+                  flush=True)
+            print(f"        omni.isaac.lab.app-> "
+                  f"{type(_app_import_errs[1]).__name__}: {_app_import_errs[1]}",
+                  flush=True)
+        print("        Fix: install Isaac Lab from your clone (see "
+              "scripts/isaac_run.sh stage 4):", flush=True)
+        print("          pip install --no-deps -e <IsaacLab>/source/isaaclab", flush=True)
+        print("        or pass --mock for the CPU smoke path.", flush=True)
         sys.exit(1)
     print("[INIT] Launching Isaac Sim (first run takes ~5 min for shader "
           "compilation)...", flush=True)
@@ -171,6 +191,18 @@ class _Csv:
         self.f.close()
 
 
+def _member_comp(stat: dict, key: str) -> float:
+    """One member's rollout-mean of a reward component / env extra (nan if
+    the env doesn't emit it, e.g. terrain_level on the mock env)."""
+    return stat["_diag"].get("reward_components", {}).get(key, float("nan"))
+
+
+def _pop_comp(stats: list, key: str) -> float:
+    """Population mean of a per-member component, ignoring nan members."""
+    vals = [v for s in stats if (v := _member_comp(s, key)) == v]
+    return sum(vals) / len(vals) if vals else float("nan")
+
+
 def _build_env(cfg, total_envs: int, device: str, mock: bool):
     if mock:
         from .mock_env import MockEnv
@@ -198,10 +230,18 @@ def main() -> int:
         print("[WARN] CUDA unavailable; falling back to CPU.", flush=True)
         device = "cpu"
 
+    # Resolve PBT scale/schedule: CLI flag wins, else the per-robot cfg.pbt.
+    def _pick(cli, cfg_val):
+        return cfg_val if cli is None else cli
+    pop_size = _pick(args.pop_size, cfg.pbt.pop_size)
+    envs_per_member = _pick(args.envs_per_member, cfg.pbt.envs_per_member)
+    pbt_interval = _pick(args.pbt_interval, cfg.pbt.pbt_interval)
+    pbt_warmup = _pick(args.pbt_warmup, cfg.pbt.pbt_warmup)
+
     # ── Population (members + per-env reward-weight tiling) ──────────────
     with _Phase("Population construction"):
         pop = Population(
-            cfg, n_members=args.pop_size, envs_per_member=args.envs_per_member,
+            cfg, n_members=pop_size, envs_per_member=envs_per_member,
             device=device, seed=args.seed,
             fitness_dist_weight=args.fitness_dist_weight,
             init_ckpt=args.init_ckpt,
@@ -221,9 +261,9 @@ def main() -> int:
     # any resume, since load reallocates them).
     env._reward_weights = pop.reward_weights
 
-    print(f"[CONFIG] pop_size={args.pop_size} envs_per_member="
-          f"{args.envs_per_member} total_envs={total_envs} n_steps={n_steps} "
-          f"interval={args.pbt_interval} warmup={args.pbt_warmup} "
+    print(f"[CONFIG] pop_size={pop_size} envs_per_member="
+          f"{envs_per_member} total_envs={total_envs} n_steps={n_steps} "
+          f"interval={pbt_interval} warmup={pbt_warmup} "
           f"update_mode={args.update_mode} device={device} mock={args.mock}",
           flush=True)
 
@@ -235,10 +275,23 @@ def main() -> int:
     log = _Csv(os.path.join(out_dir, "train_log.csv"), [
         "update", "timesteps", "wall_time", "rollout_sec", "update_sec", "sps",
         "rew_mean_pop", "rew_min_pop", "rew_max_pop", "done_rate_pop",
+        # Curriculum / robustness signals (population rollout means; nan when
+        # the env doesn't emit them, e.g. mock runs):
+        #   terrain_level_pop — mean curriculum row; should CLIMB over a run.
+        #   fallen_frac_pop   — fraction of steps spent fallen (falls only);
+        #                       the get-up metric, should DROP.
+        #   r_recover_pop / r_vel_track_pop — recovery gradient vs goal drive;
+        #                       vel_track collapsing to ~0 = stand-still trap.
+        #   dist_goal_pop     — mean live distance-to-goal over the rollout.
+        #   succ_rate_pop     — goals reached / episodes ended THIS rollout
+        #                       (noisy: few episodes end per 24-step window).
+        "terrain_level_pop", "fallen_frac_pop", "r_recover_pop",
+        "r_vel_track_pop", "dist_goal_pop", "succ_rate_pop",
         "best_fitness", "mean_fitness", "vram_alloc_gb",
     ])
     members_csv = _Csv(os.path.join(out_dir, "pbt_members.csv"), [
         "update", "member_id", "fitness", "success_rate", "mean_final_dist",
+        "terrain_level", "fallen_frac",
         *KNOB_NAMES,
     ])
     events_csv = _Csv(os.path.join(out_dir, "pbt_events.csv"), [
@@ -280,6 +333,14 @@ def main() -> int:
         rew_mins = [s["rew_min"] for s in stats]
         rew_maxs = [s["rew_max"] for s in stats]
         done_rates = [s["done_rate"] for s in stats]
+        terrain_pop = _pop_comp(stats, "terrain_level")
+        fallen_pop = _pop_comp(stats, "fallen")
+        recover_pop = _pop_comp(stats, "r_recover")
+        # Per-rollout success: goals / episodes ended THIS update (fresh each
+        # window, unlike the PBT fitness counters). nan when no episode ended.
+        roll_eps = sum(s.get("roll_eps", 0) for s in stats)
+        roll_goals = sum(s.get("roll_goals", 0) for s in stats)
+        succ_pop = roll_goals / roll_eps if roll_eps > 0 else float("nan")
         vram = (torch.cuda.memory_allocated() / 2**30
                 if torch.cuda.is_available() else 0.0)
         log.row({
@@ -289,31 +350,52 @@ def main() -> int:
             "rew_mean_pop": sum(rew_means) / len(rew_means),
             "rew_min_pop": min(rew_mins), "rew_max_pop": max(rew_maxs),
             "done_rate_pop": sum(done_rates) / len(done_rates),
+            "terrain_level_pop": terrain_pop,
+            "fallen_frac_pop": fallen_pop,
+            "r_recover_pop": recover_pop,
+            "r_vel_track_pop": _pop_comp(stats, "r_vel_track"),
+            "dist_goal_pop": _pop_comp(stats, "dist_goal"),
+            "succ_rate_pop": succ_pop,
             "best_fitness": best_fitness, "mean_fitness": mean_fitness,
             "vram_alloc_gb": vram,
         })
 
         if update % args.log_interval == 0:
+            # terr/fall/rec/succ are omitted when the env doesn't emit them
+            # (mock) or no episode ended in this rollout window (succ).
+            extra = ""
+            if terrain_pop == terrain_pop:
+                extra += f"terr={terrain_pop:.2f}  "
+            if fallen_pop == fallen_pop:
+                extra += f"fall={fallen_pop:.3f}  "
+            if recover_pop == recover_pop:
+                extra += f"rec={recover_pop:+.3f}  "
+            if succ_pop == succ_pop:
+                extra += f"succ={succ_pop:.3f}  "
             print(f"[{update:5d}/{last_updates}] "
                   f"rew(pop μ)={sum(rew_means)/len(rew_means):7.3f}  "
-                  f"done={sum(done_rates)/len(done_rates):.3f}  "
+                  f"done={sum(done_rates)/len(done_rates):.3f}  {extra}"
                   f"best_fit={best_fitness:.3f}  sps={sps:,.0f}", flush=True)
 
         if update == start_update + 1:
             report_gpu_memory("after update 1")
 
         # ── Sanity (plan Phase 5): top member's reward-component mix ────
-        if update % 200 == 0:
+        # r_recover / r_ang_vel / r_upright are the Round-1 robustness terms:
+        # r_recover should trend up toward its ceiling (recover_w) and
+        # r_vel_track must STAY positive (collapse = stand-still trap).
+        if update % 100 == 0:
             top = pop.top_member()
             comps = stats[top.id]["_diag"].get("reward_components", {})
             mix = "  ".join(f"{k}={comps.get(k, float('nan')):+.3f}"
-                            for k in ("r_alive", "r_goal", "r_vel_track"))
+                            for k in ("r_alive", "r_goal", "r_vel_track",
+                                      "r_recover", "r_ang_vel", "r_upright"))
             print(f"    [sanity] top member {top.id} components: {mix}",
                   flush=True)
 
         # ── PBT: exploit / explore ──────────────────────────────────────
-        do_pbt = (update >= args.pbt_warmup
-                  and update % args.pbt_interval == 0
+        do_pbt = (update >= pbt_warmup
+                  and update % pbt_interval == 0
                   and probe == 0)
         if do_pbt:
             events = pop.evolve()
@@ -326,6 +408,8 @@ def main() -> int:
                     "update": update, "member_id": m.id, "fitness": m.fitness,
                     "success_rate": m.success_rate,
                     "mean_final_dist": m.mean_final_dist,
+                    "terrain_level": _member_comp(stats[m.id], "terrain_level"),
+                    "fallen_frac": _member_comp(stats[m.id], "fallen"),
                     **{k: m.knobs[k] for k in KNOB_NAMES},
                 })
             for ev in events:
@@ -356,15 +440,15 @@ def main() -> int:
 
     if probe > 0:
         report_gpu_memory(f"after {probe} probe updates")
-        print(f"[PROBE] {probe} updates done for pop_size={args.pop_size}, "
-              f"envs_per_member={args.envs_per_member}. See peak VRAM above.",
+        print(f"[PROBE] {probe} updates done for pop_size={pop_size}, "
+              f"envs_per_member={envs_per_member}. See peak VRAM above.",
               flush=True)
     else:
         _save_full(os.path.join(out_dir, "population_final.pt"), pop, last_updates)
         pop.top_member().trainer.save(os.path.join(out_dir, "best.pt"))
         with open(os.path.join(args.log_dir, "SUCCESS"), "w") as f:
             f.write(f"phase=pbt robot={cfg.robot.name} "
-                    f"pop_size={args.pop_size} timesteps={timesteps} "
+                    f"pop_size={pop_size} timesteps={timesteps} "
                     f"run={run_id}\n")
         print(f"[DONE] PBT complete: {timesteps:,} timesteps. "
               f"Best fitness {best_fitness:.3f}. Artifacts in {out_dir}",

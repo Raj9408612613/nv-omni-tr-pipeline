@@ -21,21 +21,21 @@ def main():
     print("🚀 Starting Combined CPU + GPU Monitor...")
     print("This will open two monitoring windows.")
     print("Press Ctrl+C in each window to stop.")
-    
+     
     # Start GPU monitor in new terminal
     gpu_thread = threading.Thread(target=lambda: subprocess.run([
         "gnome-terminal", "--", "python3", "gpu_monitor.py"
     ]))
-    
+     
     # Start CPU monitor in new terminal  
     cpu_thread = threading.Thread(target=lambda: subprocess.run([
         "gnome-terminal", "--", "python3", "cpu_monitor.py"
     ]))
-    
+     
     gpu_thread.start()
     time.sleep(1)
     cpu_thread.start()
-    
+     
     print("✅ Monitors started in separate terminals")
     print("Close the terminal windows to stop monitoring")
 

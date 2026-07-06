@@ -77,6 +77,25 @@ def test_reward_weight_tiling_matches_member_knobs():
             ), f"member {m.id} knob {knob} not tiled"
 
 
+def test_search_space_is_config_driven():
+    """A different embodiment can declare its own PBT ranges via cfg.pbt; the
+    population must sample (and clamp) within THOSE ranges, not the Spot
+    defaults hardcoded anywhere."""
+    cfg = _cfg()
+    cfg.pbt.goal_bonus_range = (100.0, 200.0)     # unlike the Spot default
+    cfg.pbt.progress_w_range = (1.0, 2.0)
+    pop = Population(
+        cfg, n_members=N_MEMBERS, envs_per_member=ENVS_PER_MEMBER,
+        device="cpu", seed=0,
+    )
+    for m in pop.members:
+        assert 100.0 <= m.knobs["goal_bonus"] <= 200.0
+        assert 1.0 <= m.knobs["progress_w"] <= 2.0
+    # The tiled per-env weights reflect the custom range too.
+    gb = getattr(pop.reward_weights, "goal_bonus")
+    assert float(gb.min()) >= 100.0 and float(gb.max()) <= 200.0
+
+
 def test_members_have_distinct_knobs_in_range():
     _, pop, _ = _make_pop_env(seed=1)
     for knob, (lo, hi) in ALL_KNOB_RANGES.items():
@@ -151,6 +170,7 @@ def _set_fitness_inputs(m, success: float, dist: float, ep: int = 40):
     m.ep_count = ep
     m.goal_count = int(round(success * ep))
     m.final_dist_sum = dist * ep
+    m.final_dist_count = ep
 
 
 def test_evolve_exploits_best_and_perturbs():
@@ -264,6 +284,38 @@ def test_knob_fitness_correlation_runs():
     assert set(corr) == set(ALL_KNOB_RANGES)
     for v in corr.values():
         assert (v != v) or (-1.0 - 1e-9 <= v <= 1.0 + 1e-9)
+
+
+def test_recover_w_pinned_by_default_searched_when_ranged():
+    # Default PBTCfg: recover_w range is degenerate -> pinned to cfg.reward
+    # value (0.0 for spot), never perturbed.
+    _, pop, _ = _make_pop_env(seed=3)
+    assert all(m.knobs["recover_w"] == 0.0 for m in pop.members)
+    for m in pop.members:
+        pop._perturb_knobs(m)
+    assert all(m.knobs["recover_w"] == 0.0 for m in pop.members)
+
+    # Robust-style config: a real range -> sampled within it, diversified,
+    # tiled per env, and perturbations stay in range.
+    cfg = _cfg()
+    cfg.reward.recover_w = 0.5
+    cfg.pbt.recover_w_range = (0.15, 1.5)
+    pop2 = Population(
+        cfg, n_members=N_MEMBERS, envs_per_member=ENVS_PER_MEMBER,
+        device="cpu", seed=4,
+    )
+    vals = [m.knobs["recover_w"] for m in pop2.members]
+    assert all(0.15 <= v <= 1.5 for v in vals)
+    assert len({round(v, 9) for v in vals}) > 1, "recover_w not diversified"
+    rw = pop2.reward_weights.recover_w
+    for m in pop2.members:
+        sl = pop2.member_slice(m.id)
+        assert torch.allclose(
+            rw[sl], torch.full((ENVS_PER_MEMBER,), m.knobs["recover_w"])
+        )
+    for m in pop2.members:
+        pop2._perturb_knobs(m)
+        assert 0.15 <= m.knobs["recover_w"] <= 1.5
 
 
 if __name__ == "__main__":

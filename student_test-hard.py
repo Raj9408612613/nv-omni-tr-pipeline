@@ -1,6 +1,17 @@
 """
-student_overview.py — TEST-COURSE runner for the trained STUDENT policy
-=======================================================================
+student_test-hard.py — HARDER TEST-COURSE runner for the trained STUDENT policy
+===============================================================================
+Identical to student_overview.py (same two courses, camera, carrot waypoint,
+depth handling, metrics) but with the difficulty turned up:
+
+    * STEP HEIGHTS are higher   (taller pyramid / deeper pit, chunkier steps)
+    * ROUGH terrain is rougher  (larger random bumps)
+    * GOALS are further away     (longer segments -> longer courses)
+
+Everything else is unchanged from student_overview.py. See that file's header
+for the full description; only the geometry constants and a couple of defaults
+differ here (search for "HARD:" below).
+
 Drives the deployable depth-CNN+GRU StudentPolicy through two hand-built
 obstacle *courses* (not the training curriculum grid), records a fixed-angle
 oblique overview MP4, and prints per-course navigation metrics. Headless.
@@ -36,11 +47,11 @@ TWO THINGS WORTH KNOWING (both handled automatically here)
 
 Run from the repo root in the `isaac` conda env:
 
-    PYTHONPATH=. python student_overview.py \
+    PYTHONPATH=. python student_test-hard.py \
         --ckpt student_best_20260615.pt \
-        --num_envs 64 --steps 1500 --headless --enable_cameras
+        --num_envs 64 --steps 2000 --headless --enable_cameras
 
-Outputs under --out_dir (default ./student_overview_out):
+Outputs under --out_dir (default ./student_test_hard_out):
     overview.mp4        fixed world camera over both courses
     student_pov_depth.mp4   env-0 depth POV at the high render resolution
     metrics.txt         per-course goals / falls / timeouts + success rate
@@ -59,13 +70,13 @@ try:
 except ImportError:
     from omni.isaac.lab.app import AppLauncher  # type: ignore
 
-_p = argparse.ArgumentParser(description="Student test-course overview + eval")
+_p = argparse.ArgumentParser(description="Student HARD test-course overview + eval")
 _p.add_argument("--ckpt", required=True, help="Student checkpoint (.pt)")
 _p.add_argument("--robot", default="spot")
 _p.add_argument("--num_envs", type=int, default=64,
                 help="Total robots, split evenly across the two courses")
 _p.add_argument("--steps", type=int, default=1500)
-_p.add_argument("--out_dir", default="student_overview_out")
+_p.add_argument("--out_dir", default="student_test_hard_out")
 _p.add_argument("--fps", type=int, default=25)
 _p.add_argument("--seed", type=int, default=0)
 # Depth RENDER resolution (downsampled to the net's trained res before infer).
@@ -74,10 +85,10 @@ _p.add_argument("--cam_width", type=int, default=174,
 _p.add_argument("--cam_height", type=int, default=116,
                 help="Depth render height (>= trained res; downsampled to net)")
 # Course / navigation geometry.
-_p.add_argument("--seg_len", type=float, default=4.0, help="Length of each terrain segment (m)")
+_p.add_argument("--seg_len", type=float, default=6.0, help="HARD: longer segments -> goals further (m)")
 _p.add_argument("--lane_width", type=float, default=3.0, help="Walkable lane width (m)")
 _p.add_argument("--lookahead", type=float, default=2.0, help="Carrot waypoint lookahead (m)")
-_p.add_argument("--episode_s", type=float, default=45.0, help="Max seconds per course attempt")
+_p.add_argument("--episode_s", type=float, default=65.0, help="Max seconds per course attempt (longer courses)")
 _p.add_argument("--domain_rand", action="store_true", help="Enable DR + random pushes (off by default for a clean test)")
 # Overview camera placement (world meters). Auto-framed from the course if None.
 _p.add_argument("--cam_pos", type=float, nargs=3, default=None)
@@ -113,12 +124,13 @@ except ImportError:
 # stairs / bumps / pits.
 # ════════════════════════════════════════════════════════════════════════════
 
-PLINTH = 0.5          # flat walkable surface height (m)
-PYR_HEIGHT = 0.45     # pyramid apex rise above the plinth (m)
-PIT_DEPTH = 0.40      # stairs-down pit depth below the plinth (m)
-STEP_DEPTH = 0.30     # x-extent of one stair strip (m)
+# HARD: plinth raised so the deeper pit still clears the z=0 ground plane.
+PLINTH = 0.8          # flat walkable surface height (m)   (overview: 0.5)
+PYR_HEIGHT = 0.90     # HARD: taller pyramid apex (m)      (overview: 0.45)
+PIT_DEPTH = 0.60      # HARD: deeper stairs-down pit (m)   (overview: 0.40)
+STEP_DEPTH = 0.50     # HARD: chunkier/taller steps (m)    (overview: 0.30)
 ROUGH_CELL = 0.50     # rough-terrain pillar footprint (m)
-ROUGH_AMP = 0.12      # rough-terrain max bump above the plinth (m)
+ROUGH_AMP = 0.22      # HARD: rougher bumps (m)            (overview: 0.12)
 LANE_GAP = 2.0        # clear gap between the two lanes (m)
 
 # Colors (diffuse) per terrain kind — keeps the overview legible.

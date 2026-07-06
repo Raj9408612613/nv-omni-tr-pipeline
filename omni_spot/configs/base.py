@@ -77,12 +77,28 @@ class RewardWeightsCfg:
     # Termination thresholds (check_termination)
     fall_height: float = 0.2        # m over terrain
     fall_tilt_rad: float = 1.0472   # pi/3
+    # ── Recovery / robustness (Round-1 "rebalance instead of terminate") ──
+    # terminate_on_fall=False -> a fall does NOT end the episode; the robot
+    # must get back up (full get-up). recover_w rewards uprightness (the
+    # get-up gradient); ang_vel_w penalizes the base angular velocity that
+    # precedes a tip-over. All default to the original behavior (terminate on
+    # fall, no extra shaping), so existing robots are byte-for-byte unchanged.
+    terminate_on_fall: bool = True
+    recover_w: float = 0.0          # reward = recover_w * cos(tilt): + upright
+    ang_vel_w: float = 0.0          # penalty on base angular velocity (<= 0)
 
 
 @dataclass
 class GoalCfg:
     dist_range: tuple[float, float] = (1.5, 3.5)  # m from spawn
     episode_len_steps: int = 1000
+    # Half-width (m) of the square around the patch CENTER spawns are sampled
+    # from. None = the full usable patch (original behavior). legged_gym spawns
+    # at origin ±1 m; a small value keeps spawns on the stair pyramids' center
+    # platform where the env-origin z is valid — spawn z is origin.z +
+    # init_height, so full-patch spawns on tall stair rows drop (pyramid up)
+    # or bury (pyramid down) the robot by up to the apex height.
+    spawn_half: float | None = None
 
 
 @dataclass
@@ -122,6 +138,38 @@ class TerrainCfg:
     stair_step_height_range: tuple[float, float] = (0.05, 0.23)
     stair_step_width: float = 0.30
     stair_platform_width: float = 3.0
+    # ── Parkour sub-terrains ("next level" beyond stairs) ────────────────
+    # Every proportion defaults to 0.0 -> the terrain is NOT added to the
+    # generator, so `spot` / `spot_hard` build the exact original 4-terrain
+    # mix. `spot_parkour` turns these on (and bumps `cols` so each active
+    # type gets a curriculum column). Difficulty (terrain row) scales each
+    # one's active dimension exactly like stair_step_height_range: row 0 =
+    # easiest, top row = the configured max.
+    parkour_platform_width: float = 2.0     # clear flat start patch (m)
+    # Scattered low boxes -> hurdles to step over / weave around.
+    discrete_obstacles_proportion: float = 0.0
+    discrete_obstacle_height_range: tuple[float, float] = (0.05, 0.18)
+    discrete_obstacle_width_range: tuple[float, float] = (0.25, 0.50)
+    discrete_obstacle_num: int = 10
+    # Grid of cells at random heights -> broken / uneven floor.
+    random_grid_proportion: float = 0.0
+    random_grid_width: float = 0.45
+    random_grid_height_range: tuple[float, float] = (0.02, 0.12)
+    # Thin raised rails -> narrow step-overs.
+    rails_proportion: float = 0.0
+    rail_thickness_range: tuple[float, float] = (0.05, 0.12)
+    rail_height_range: tuple[float, float] = (0.05, 0.16)
+    # Stepping stones over voids -> precise foot placement (HARD; off by
+    # default, reserved for a later spot_parkour_hard stage).
+    stepping_stones_proportion: float = 0.0
+    stepping_stone_height_max: float = 0.10
+    stepping_stone_width_range: tuple[float, float] = (0.30, 0.55)
+    stepping_stone_distance_range: tuple[float, float] = (0.05, 0.18)
+    # Visual coloring of the generated terrain mesh. "none" (default) keeps the
+    # raw grey heightfield used during training; "random" gives each sub-terrain
+    # patch a distinct color, "height" tints by elevation. Only consumed when
+    # the installed TerrainGeneratorCfg exposes a color_scheme field.
+    color_scheme: str = "none"
 
 
 @dataclass
@@ -142,6 +190,41 @@ class CurriculumCfg:
     # Covered < this fraction (and didn't fall) -> demote. Raised from 0.5,
     # which demoted nearly every episode and collapsed the curriculum to flat.
     demote_progress_frac: float = 0.25
+
+
+@dataclass
+class CourseCfg:
+    """Shaped course arenas (straight / L / T corridors) + carrot goals.
+
+    enabled=False (default) -> standard patch-grid terrain, byte-for-byte
+    unchanged behavior. When enabled, build_env_cfg swaps the terrain for a
+    rows x n_variants grid where each CELL is a whole course (see
+    omni_spot/course.py): the column (variant) decides shape + segment order,
+    the difficulty ROW scales harshness only (geometry is row-invariant, so
+    the env can reconstruct every centerline from the variant id alone).
+    Goals are fed as a moving carrot on the centerline; the robot spawns at a
+    RANDOM END with random yaw and must traverse to the opposite end.
+    """
+    enabled: bool = False
+    cell_size: float = 18.0         # m, square course cell
+    lane_width: float = 3.5         # walkable corridor width
+    wall_height: float = 1.0        # off-lane plateau above highest lane point
+    rows: int = 6                   # difficulty rows (harshness only)
+    n_variants: int = 12            # columns = distinct course layouts
+    seg_len: float = 4.5            # nominal terrain-segment length (m)
+    end_pad: float = 2.0            # flat pad at both ends (spawn/goal)
+    bend_pad: float = 1.2           # flat zone around L/T bends
+    shapes: tuple[str, ...] = ("straight", "L", "T")
+    dense_step: float = 0.25        # centerline resample step (m)
+    layout_seed: int = 1234
+    # Harshness (scaled by difficulty row, geometry unchanged)
+    stair_height_range: tuple[float, float] = (0.06, 0.28)
+    rough_noise_range: tuple[float, float] = (0.02, 0.16)
+    step_width: float = 0.32
+    # Carrot goal-planning
+    lookahead: float = 2.5          # m ahead along the path (trained goal range)
+    window: int = 24                # forward search window (x dense_step m)
+    spawn_jitter: float = 0.3       # m of xy noise at the spawn pad
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -228,6 +311,15 @@ class DRCfg:
     push_robots: bool = True
     push_interval_s: float = 8.0
     push_max_vel_xy: float = 0.5                             # m/s impulse
+    # ── Actuator leg failure (Round-2 "one leg disable" robustness) ──────
+    # Per episode, with prob leg_failure_prob, ONE leg's joints have their
+    # kp/kv scaled to leg_failure_strength (~0 = limp), forcing the policy to
+    # walk / recover on a degraded leg. Disabled by default. Deliberately NOT
+    # exposed in the privileged obs: the policy must infer the failure from
+    # proprioception, so the skill survives distillation to the student.
+    randomize_leg_failure: bool = False
+    leg_failure_prob: float = 0.0
+    leg_failure_strength: float = 0.0    # kp/kv scale of the disabled leg
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -327,6 +419,52 @@ class StudentTrainCfg:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Population-Based Training (Phase-1 teacher search)
+# ════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PBTCfg:
+    """Per-robot PBT search space + schedule.
+
+    Lives on ExperimentCfg so each embodiment declares its OWN knob ranges —
+    reward magnitudes differ across robots, so a search space tuned for Spot
+    must not be hardcoded into the trainer. train_pbt CLI flags override these
+    when provided; otherwise these per-robot values are the source of truth.
+
+    The 4 reward knobs are tiled per-env; the 3 PPO knobs are per-member. Ranges
+    are (lo, hi) and are also the clamp bounds used after each perturbation.
+    """
+    # Population scale (VRAM-gated; see plan Phase 5).
+    pop_size: int = 24
+    envs_per_member: int = 2048
+    # Schedule.
+    pbt_interval: int = 50          # evolve every N updates
+    pbt_warmup: int = 100           # no PBT before this update
+    # Weight-free fitness = success_rate - fitness_dist_weight * mean_final_dist.
+    fitness_dist_weight: float = 0.1
+    # Reward-knob ranges (must stay within what reward.compute_reward expects).
+    alive_bonus_range: tuple[float, float] = (0.0, 0.2)
+    progress_w_range: tuple[float, float] = (10.0, 100.0)
+    vel_track_w_range: tuple[float, float] = (0.5, 3.0)
+    goal_bonus_range: tuple[float, float] = (10.0, 50.0)
+    # Get-up gradient (Round-1 robustness). A DEGENERATE range (lo >= hi)
+    # means "pinned": the knob is NOT searched — every member holds the
+    # config's cfg.reward.recover_w and perturbation never touches it. This
+    # is the default so spot / spot_hard / spot_parkour keep recover_w
+    # exactly as configured; robustness configs opt in with a real range.
+    recover_w_range: tuple[float, float] = (0.0, 0.0)
+    # PPO-knob ranges.
+    clip_eps_range: tuple[float, float] = (0.1, 0.3)
+    ent_coef_range: tuple[float, float] = (0.0, 0.02)
+    lr_range: tuple[float, float] = (1e-5, 1e-3)
+    # Exploration: each perturbed knob is multiplied by a random factor, clamped.
+    perturb_factors: tuple[float, ...] = (0.8, 1.2)
+    # Initial ent_coef floor: multiplicative perturbation cannot revive a knob
+    # that started at exactly 0, so members are seeded strictly positive.
+    ent_coef_min_init: float = 1e-3
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Aggregate
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -339,6 +477,7 @@ class ExperimentCfg:
     obstacles: ObstacleCfg = field(default_factory=ObstacleCfg)
     terrain: TerrainCfg = field(default_factory=TerrainCfg)
     curriculum: CurriculumCfg = field(default_factory=CurriculumCfg)
+    course: CourseCfg = field(default_factory=CourseCfg)
     scandots: ScandotsCfg = field(default_factory=ScandotsCfg)
     camera: CameraRigCfg = field(default_factory=CameraRigCfg)
     dr: DRCfg = field(default_factory=DRCfg)
@@ -346,6 +485,7 @@ class ExperimentCfg:
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     teacher: TeacherTrainCfg = field(default_factory=TeacherTrainCfg)
     student: StudentTrainCfg = field(default_factory=StudentTrainCfg)
+    pbt: PBTCfg = field(default_factory=PBTCfg)
 
     # ── Derived dimensions (the only place they are defined) ─────────
     @property

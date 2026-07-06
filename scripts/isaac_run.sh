@@ -34,6 +34,11 @@ set -euo pipefail
 ENV_NAME="isaac"
 PY_VERSION="3.11"
 TORCH_CUDA="cu128"                 # Blackwell / driver 580. Adjust if needed.
+TORCH_VERSION="2.7.0"              # MUST match Isaac Lab's pin. The cu128 build
+                                   # of this version is what carries sm_120
+                                   # (Blackwell) kernels; the default-index
+                                   # cu126 build of the SAME version does not.
+TORCHVISION_VERSION="0.22.0"       # pairs with torch 2.7.0
 NVIDIA_DRIVER="nvidia-driver-580-open"
 SWAP_SIZE="32G"
 CONDA_DIR="$HOME/miniconda3"
@@ -106,10 +111,46 @@ echo "    active python: $(python --version)"
 echo ">>> Stage 2: PyTorch ($TORCH_CUDA) + build tooling"
 pip install "setuptools<75.0.0"
 
-    pip install torch torchvision \
-        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
-        
-fi
+# (Re)install torch if it is missing OR if the installed build lacks compiled
+# kernels for THIS GPU's compute arch. The latter is the classic Blackwell
+# trap: `pip install torch` (default index) gives a CUDA 12.6 build whose
+# kernels stop at sm_90, so on an sm_120 card it imports fine but dies at
+# runtime with "no kernel image is available for execution on the device".
+# We compare the device capability against torch's compiled arch list — both
+# are static/property queries that do NOT launch a kernel, so the check is
+# safe even on a mismatched build. A plain `import torch` check is NOT enough
+# (pip matches on version, not CUDA build, so a wrong-arch torch slips by).
+torch_arch_ok() {
+    python - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch
+    cap = torch.cuda.get_device_capability()       # e.g. (12, 0) on Blackwell
+except Exception:
+    sys.exit(1)
+arch = f"sm_{cap[0]}{cap[1]}"
+sys.exit(0 if arch in torch.cuda.get_arch_list() else 1)
+PY
+}
+
+# Install the pinned, GPU-arch-correct torch ONLY when the current install is
+# missing or built for the wrong arch. Idempotent: a no-op once the right wheel
+# is in place, so re-running the script does NOT redownload/reinstall torch
+# every time. No --no-cache-dir, so the rare reinstall reuses the pip cache
+# instead of pulling the ~3 GB wheel again.
+ensure_torch() {
+    if torch_arch_ok; then
+        echo "    torch OK — present and has kernels for this GPU's compute arch"
+    else
+        echo "    torch missing or wrong CUDA build — installing torch==$TORCH_VERSION ($TORCH_CUDA) ..."
+        pip install --force-reinstall \
+            "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+            --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
+        # If $TORCH_CUDA stable still lacks your arch (very new GPU), switch to
+        # the matching nightly index, e.g. .../whl/nightly/cu128, and re-run.
+    fi
+}
+ensure_torch
 python - <<'PY'
 import torch
 ok = torch.cuda.is_available()
@@ -151,22 +192,52 @@ else
     echo "    IsaacLab already cloned at $ISAACLAB_DIR"
 fi
 
-if python -c "import isaaclab" 2>/dev/null; then
-    echo "    isaaclab already importable"
+# Each Isaac Lab piece is checked and installed INDEPENDENTLY. The old version
+# wrapped core+deps+assets+tasks in ONE `import isaaclab` guard: with set -e,
+# a pip failure halfway through the block aborted the script AFTER the core -e
+# install had already linked, so every later run saw "isaaclab already
+# importable" and skipped the missing deps/assets/tasks forever. A bare
+# `import isaaclab` also succeeds without its deps, so it proves nothing —
+# the probe below imports what train.py actually needs (isaaclab.app).
+if python -c "from isaaclab.app import AppLauncher" 2>/dev/null; then
+    echo "    isaaclab core already importable (AppLauncher OK)"
 else
-    pushd "$ISAACLAB_DIR" >/dev/null
-    pip install --no-deps -e source/isaaclab
-    pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
-        prettytable==3.3.0 flatdict
-    pip install --use-deprecated=legacy-resolver -e source/isaaclab_assets
-    pip install --use-deprecated=legacy-resolver -e source/isaaclab_tasks
-    popd >/dev/null
+    pip install --no-deps -e "$ISAACLAB_DIR/source/isaaclab"
+fi
+# Deps are cheap no-ops when already satisfied — run them UNconditionally so a
+# partially-installed env self-heals instead of being skipped past.
+pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
+    prettytable==3.3.0 flatdict
+if python -c "import isaaclab_assets" 2>/dev/null; then
+    echo "    isaaclab_assets already importable"
+else
+    pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_assets"
+fi
+if python -c "import isaaclab_tasks" 2>/dev/null; then
+    echo "    isaaclab_tasks already importable"
+else
+    pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_tasks"
 fi
 pip install tensorboard "imageio[ffmpeg]" h5py
 
+# Isaac Sim / Isaac Lab declare their own torch dependency and, when they (re)
+# install, can silently swap our cu128 wheel for a default-index cu126 build
+# that has NO sm_120 kernels — the exact "no kernel image" trap. Re-assert the
+# correct build now, AFTER those installs, so torch has the last word. This is
+# why earlier runs seemed to "reinstall every time": Stage 2 fixed torch, then
+# Stage 4 clobbered it. Idempotent once stable.
+echo ">>> Re-verifying torch CUDA arch after Isaac install"
+ensure_torch
+
+# Hard verify — ABORT here if the install is broken. The old `|| echo FAILED`
+# swallowed the error, so the script rolled into Stage 5 and exited 0 with a
+# broken env; the failure was buried mid-log. The AppLauncher import is the
+# exact path train_pbt.py takes, so passing here means training can launch.
 echo "    import check:"
-python -c "import isaacsim; print('      isaacsim OK')" || echo "      isaacsim FAILED"
-python -c "import isaaclab; print('      isaaclab OK')" || echo "      isaaclab FAILED"
+python -c "import isaacsim; print('      isaacsim OK')" \
+    || { echo "      isaacsim FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
+python -c "from isaaclab.app import AppLauncher; print('      isaaclab OK (AppLauncher importable)')" \
+    || { echo "      isaaclab FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
 
 # =============================================================================
 # Stage 5 — smoke tests + (optional) full teacher training

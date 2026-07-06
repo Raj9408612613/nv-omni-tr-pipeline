@@ -29,6 +29,7 @@ def compute_reward(
     has_collision: torch.Tensor,   # (B,) bool
     prev_dist_goal: torch.Tensor,  # (B,)
     base_height: torch.Tensor,     # (B,) height over terrain under the base
+    root_ang_vel: torch.Tensor | None = None,  # (B, 3) base frame; optional
 ) -> tuple[torch.Tensor, dict, torch.Tensor]:
     """Fully batched reward. Returns (total, info dict, new_dist_goal)."""
     robot_xy = robot_pos[:, :2]
@@ -56,6 +57,21 @@ def compute_reward(
 
     # ── 5. Height deviation (terrain-relative) ──────────────────────────
     r_height = torch.abs(base_height - w.target_height) * w.height_w
+
+    # ── 5b. Recovery: reward uprightness (the full get-up gradient) ─────
+    # cos_tilt is +1 upright, 0 on the side, -1 inverted. With recover_w > 0
+    # a fallen robot keeps a standing incentive even though it earns no
+    # progress while down — so "rebalance instead of terminate" has a slope
+    # to climb. recover_w defaults to 0 (no effect on existing robots).
+    r_recover = cos_tilt * w.recover_w
+
+    # ── 5c. Angular-velocity penalty (damp the tipping that precedes a fall)
+    if root_ang_vel is not None:
+        r_ang_vel = torch.clamp(
+            torch.sum(root_ang_vel ** 2, dim=-1) * w.ang_vel_w, -2.0, 0.0
+        )
+    else:
+        r_ang_vel = torch.zeros_like(base_height)
 
     # ── 6. Energy ───────────────────────────────────────────────────────
     r_energy = torch.clamp(
@@ -109,7 +125,8 @@ def compute_reward(
     # from the objective and kept in `info` for monitoring only.
     total = (r_progress + r_goal + r_collision + r_near
              + r_upright + r_height + r_energy + r_smooth
-             + r_alive + r_heading + r_vel_track)
+             + r_alive + r_heading + r_vel_track
+             + r_recover + r_ang_vel)
     total = torch.where(torch.isfinite(total), total, torch.zeros_like(total))
     # Upper bound is goal_bonus + 10, which may be scalar OR per-env (N,).
     # torch.clamp cannot mix a scalar min with a tensor max (raises TypeError),
@@ -133,6 +150,8 @@ def compute_reward(
         "r_alive": r_alive,
         "r_heading": r_heading,
         "r_vel_track": r_vel_track,
+        "r_recover": r_recover,
+        "r_ang_vel": r_ang_vel,
         "dist_goal": dist_goal,
     }
     return total, info, dist_goal

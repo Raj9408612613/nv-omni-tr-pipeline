@@ -44,31 +44,51 @@ import random
 
 import torch
 
-from .configs.base import ExperimentCfg
+from .configs.base import ExperimentCfg, PBTCfg
 from .ppo import PPOTrainer
 
-# ── Knob ranges (plan Phase 3) ───────────────────────────────────────────────
+# ── Knob identity (structural — every robot has the same 7 knobs) ────────────
 # The 4 reward knobs become per-env tensors; the 3 PPO knobs stay per-member
-# scalars applied to each member's PPOTrainer before its update.
+# scalars applied to each member's PPOTrainer before its update. The NAMES are
+# fixed (they map to RewardWeightsCfg fields + PPO hyperparams); the RANGES are
+# per-robot and read from cfg.pbt (PBTCfg) via knob_ranges().
+REWARD_KNOBS: tuple[str, ...] = (
+    "alive_bonus", "progress_w", "vel_track_w", "goal_bonus", "recover_w"
+)
+PPO_KNOBS: tuple[str, ...] = ("clip_eps", "ent_coef", "lr")
+KNOB_NAMES: tuple[str, ...] = REWARD_KNOBS + PPO_KNOBS
+
+
+def knob_ranges(pbt: PBTCfg) -> dict[str, tuple[float, float]]:
+    """Map each knob name to its (lo, hi) range from a PBTCfg.
+
+    A DEGENERATE range (lo >= hi) marks the knob as PINNED: it is not
+    searched — every member holds the config's scalar value (cfg.reward.<knob>
+    for reward knobs) and perturbation skips it. recover_w defaults to pinned
+    so non-robustness configs keep their configured value untouched.
+    """
+    return {
+        "alive_bonus": pbt.alive_bonus_range,
+        "progress_w": pbt.progress_w_range,
+        "vel_track_w": pbt.vel_track_w_range,
+        "goal_bonus": pbt.goal_bonus_range,
+        "recover_w": pbt.recover_w_range,
+        "clip_eps": pbt.clip_eps_range,
+        "ent_coef": pbt.ent_coef_range,
+        "lr": pbt.lr_range,
+    }
+
+
+# Default Spot ranges (kept for back-compat / quick reference); the live ranges
+# always come from cfg.pbt so a different embodiment can declare its own.
+ALL_KNOB_RANGES: dict[str, tuple[float, float]] = knob_ranges(PBTCfg())
 REWARD_KNOB_RANGES: dict[str, tuple[float, float]] = {
-    "alive_bonus": (0.0, 0.2),
-    "progress_w": (10.0, 100.0),
-    "vel_track_w": (0.5, 3.0),
-    "goal_bonus": (10.0, 50.0),
+    k: ALL_KNOB_RANGES[k] for k in REWARD_KNOBS
 }
 PPO_KNOB_RANGES: dict[str, tuple[float, float]] = {
-    "clip_eps": (0.1, 0.3),
-    "ent_coef": (0.0, 0.02),
-    "lr": (1e-5, 1e-3),
+    k: ALL_KNOB_RANGES[k] for k in PPO_KNOBS
 }
-ALL_KNOB_RANGES: dict[str, tuple[float, float]] = {
-    **REWARD_KNOB_RANGES, **PPO_KNOB_RANGES
-}
-REWARD_KNOBS: tuple[str, ...] = tuple(REWARD_KNOB_RANGES)
-PPO_KNOBS: tuple[str, ...] = tuple(PPO_KNOB_RANGES)
-KNOB_NAMES: tuple[str, ...] = tuple(ALL_KNOB_RANGES)
-
-PERTURB_FACTORS = (0.8, 1.2)
+PERTURB_FACTORS = PBTCfg().perturb_factors
 
 # Per-step buffer keys, matching PPOTrainer.collect_rollout / _finalize_rollout.
 _BUF_KEYS = (
@@ -94,6 +114,7 @@ class Member:
         self.ep_count: int = 0
         self.goal_count: int = 0
         self.final_dist_sum: float = 0.0
+        self.final_dist_count: int = 0  # dones with a valid prev-step dist
         # Last computed components (for logging / contamination guard).
         self.success_rate: float = float("nan")
         self.mean_final_dist: float = float("nan")
@@ -115,6 +136,7 @@ class Member:
         self.ep_count = 0
         self.goal_count = 0
         self.final_dist_sum = 0.0
+        self.final_dist_count = 0
 
 
 class Population:
@@ -127,13 +149,21 @@ class Population:
         envs_per_member: int,
         device: str = "cuda",
         seed: int = 0,
-        fitness_dist_weight: float = 0.1,
+        fitness_dist_weight: float | None = None,
         init_ckpt: str | None = None,
     ):
         self.cfg = cfg
         self.envs_per_member = envs_per_member
         self.device = torch.device(device)
-        self.fitness_dist_weight = fitness_dist_weight
+        # Search space + schedule come from the per-robot PBTCfg; the caller may
+        # still override fitness_dist_weight (train_pbt CLI).
+        self._ranges = knob_ranges(cfg.pbt)
+        self._perturb_factors = tuple(cfg.pbt.perturb_factors)
+        self._ent_coef_min_init = float(cfg.pbt.ent_coef_min_init)
+        self.fitness_dist_weight = (
+            cfg.pbt.fitness_dist_weight if fitness_dist_weight is None
+            else fitness_dist_weight
+        )
         self.rng = random.Random(seed)
 
         self.members: list[Member] = []
@@ -150,6 +180,10 @@ class Population:
         self._weight_tensors: dict[str, torch.Tensor] = {}
         self._reward_weights = None
         self.build_reward_weights()
+        # Previous step's per-env goal distance — the pre-reset reading used
+        # for final_dist accounting (see collect_rollouts). None until the
+        # first step ever.
+        self._last_dist: torch.Tensor | None = None
 
     # ── layout helpers ────────────────────────────────────────────────
     @property
@@ -192,17 +226,24 @@ class Population:
             self._weight_tensors[knob][sl] = float(knobs[knob])
 
     # ── initial knob sampling ─────────────────────────────────────────
+    def _pinned_value(self, knob: str) -> float:
+        """Value a pinned (degenerate-range) knob holds: the config scalar."""
+        if knob in REWARD_KNOBS:
+            return float(getattr(self.cfg.reward, knob))
+        return float(self._ranges[knob][0])
+
     def _sample_initial_knobs(self) -> dict[str, float]:
         knobs: dict[str, float] = {}
-        for knob, (lo, hi) in ALL_KNOB_RANGES.items():
-            if knob == "lr":
-                knobs[knob] = math.exp(
-                    self.rng.uniform(math.log(lo), math.log(hi))
-                )
+        for knob, (lo, hi) in self._ranges.items():
+            if hi <= lo:
+                knobs[knob] = self._pinned_value(knob)
+            elif knob == "lr":
+                lo_l = math.log(max(lo, 1e-12))
+                knobs[knob] = math.exp(self.rng.uniform(lo_l, math.log(hi)))
             elif knob == "ent_coef":
                 # Start strictly positive: multiplicative perturbation can never
                 # revive a knob that has hit exactly 0.
-                knobs[knob] = self.rng.uniform(max(lo, 1e-3), hi)
+                knobs[knob] = self.rng.uniform(min(max(lo, self._ent_coef_min_init), hi), hi)
             else:
                 knobs[knob] = self.rng.uniform(lo, hi)
         return knobs
@@ -218,6 +259,10 @@ class Population:
         adapt_losses: list[list[float]] = [[] for _ in range(M)]
         reward_sums: list[dict | None] = [None for _ in range(M)]
         reward_count = 0
+        # Per-ROLLOUT success counters (fresh each update, unlike the
+        # fitness-window m.ep_count/m.goal_count) — feed the `succ=` column.
+        roll_eps = [0] * M
+        roll_goals = [0] * M
 
         for step in range(n_steps):
             actions = []
@@ -245,6 +290,14 @@ class Population:
             done_f = done.float()
             at_goal = getattr(env, "_at_goal", None)
             dist_goal = info.get("dist_goal", None)
+            # Final distance for envs ending THIS step comes from the PREVIOUS
+            # step's reading (self._last_dist), not this step's: measured
+            # mean_final_dist tracked the mean INITIAL goal distance (~2.2 m
+            # on 1.5-3.5 m goals, ~4.8 m on 3-7 m goals), i.e. the done-step
+            # extras already reflect the post-reset resampled goal. One
+            # control step (~0.03 m) before the terminal state is the honest
+            # pre-reset distance under either env ordering.
+            dist_prev = self._last_dist
 
             for m in self.members:
                 sl = self.member_slice(m.id)
@@ -273,10 +326,16 @@ class Population:
                 n_done = int(done_m.sum())
                 if n_done > 0:
                     m.ep_count += n_done
+                    roll_eps[m.id] += n_done
                     if at_goal is not None:
-                        m.goal_count += int((at_goal[sl] & done_m).sum())
-                    if dist_goal is not None:
-                        m.final_dist_sum += float(dist_goal[sl][done_m].sum())
+                        n_goal = int((at_goal[sl] & done_m).sum())
+                        m.goal_count += n_goal
+                        roll_goals[m.id] += n_goal
+                    if dist_prev is not None:
+                        m.final_dist_sum += float(dist_prev[sl][done_m].sum())
+                        m.final_dist_count += n_done
+            if dist_goal is not None:
+                self._last_dist = dist_goal
             reward_count += 1
 
         batches, stats = [], []
@@ -288,6 +347,8 @@ class Population:
                 bufs[m.id], last_value, adapt_losses[m.id],
                 reward_sums[m.id], reward_count, None,
             )
+            st["roll_eps"] = roll_eps[m.id]
+            st["roll_goals"] = roll_goals[m.id]
             batches.append(batch)
             stats.append(st)
         return obs, batches, stats
@@ -323,8 +384,15 @@ class Population:
             m.mean_final_dist = float("nan")
             return float("-inf")
         m.success_rate = m.goal_count / m.ep_count
-        m.mean_final_dist = m.final_dist_sum / m.ep_count
-        return m.success_rate - self.fitness_dist_weight * m.mean_final_dist
+        # Denominator = dones that had a valid prev-step distance (the very
+        # first step of the very first rollout has none).
+        if m.final_dist_count > 0:
+            m.mean_final_dist = m.final_dist_sum / m.final_dist_count
+            dist_term = m.mean_final_dist
+        else:
+            m.mean_final_dist = float("nan")
+            dist_term = 0.0
+        return m.success_rate - self.fitness_dist_weight * dist_term
 
     # ── exploit / explore ─────────────────────────────────────────────
     def evolve(self) -> list[dict]:
@@ -380,8 +448,10 @@ class Population:
         dst.knobs = dict(src.knobs)
 
     def _perturb_knobs(self, m: Member) -> None:
-        for knob, (lo, hi) in ALL_KNOB_RANGES.items():
-            factor = self.rng.choice(PERTURB_FACTORS)
+        for knob, (lo, hi) in self._ranges.items():
+            if hi <= lo:  # pinned knob: never perturbed, never clamped to 0
+                continue
+            factor = self.rng.choice(self._perturb_factors)
             m.knobs[knob] = _clamp(m.knobs[knob] * factor, lo, hi)
 
     # ── contamination guard (Phase 5) ─────────────────────────────────
@@ -447,7 +517,12 @@ class Population:
             )
             m.trainer._ret_mean = float(ms["ret_mean"])
             m.trainer._ret_std = float(ms["ret_std"])
-            m.knobs = {k: float(ms["knobs"][k]) for k in KNOB_NAMES}
+            # Knobs added after a checkpoint was written (e.g. recover_w)
+            # fall back to a fresh sample — pinned knobs get the config value.
+            fresh = self._sample_initial_knobs()
+            m.knobs = {
+                k: float(ms["knobs"].get(k, fresh[k])) for k in KNOB_NAMES
+            }
             m.fitness = float(ms.get("fitness", float("-inf")))
             m.fitness_history = list(ms.get("fitness_history", []))
         # Restore slice ownership AND per-env weight tiling, not just weights.
