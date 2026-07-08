@@ -1,5 +1,5 @@
 """
-teacher-chpt-strgt.py — TEST-COURSE runner for a TEACHER checkpoint
+teacher-ckpt-strgt.py — TEST-COURSE runner for a TEACHER checkpoint
 ===================================================================
 Same two hand-built straight courses, carrot waypoints, green goal spheres,
 overview camera and metrics as student_overview.py — but drives the TEACHER
