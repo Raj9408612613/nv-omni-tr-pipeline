@@ -44,7 +44,7 @@ def make_cfg():
     g = cfg.goal
     g.dist_range = (3.0, 7.0)
     g.episode_len_steps = 1200
-    g.spawn_half = 1.0             # spawn on the center platform (valid z)
+    g.spawn_half = 0.0             # fixed start, standing on the platform
 
     t = cfg.terrain
     t.patch_size = 16.0
