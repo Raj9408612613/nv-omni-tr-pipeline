@@ -98,7 +98,13 @@ class GoalCfg:
     # platform where the env-origin z is valid — spawn z is origin.z +
     # init_height, so full-patch spawns on tall stair rows drop (pyramid up)
     # or bury (pyramid down) the robot by up to the apex height.
-    spawn_half: float | None = None
+    # 0.0 (default) = spawn EXACTLY at the patch centre: a fixed, repeatable
+    # start pose standing on the ground. The centre is the stair pyramids'
+    # platform and is the one point where Isaac's env-origin z (max over a 2 m
+    # box there) is the true terrain height, so the robot is placed on the
+    # surface instead of dropped onto it. Widen it only to trade that guarantee
+    # for spawn variety; None restores the original full-patch sampling.
+    spawn_half: float | None = 0.0
 
 
 @dataclass
@@ -145,7 +151,9 @@ class TerrainCfg:
     # type gets a curriculum column). Difficulty (terrain row) scales each
     # one's active dimension exactly like stair_step_height_range: row 0 =
     # easiest, top row = the configured max.
-    parkour_platform_width: float = 2.0     # clear flat start patch (m)
+    parkour_platform_width: float = 3.0     # clear flat start patch (m);
+    # must exceed Isaac's 2 m origin window so a centre spawn stands on flat
+    # ground rather than on top of a hurdle/rail.
     # Scattered low boxes -> hurdles to step over / weave around.
     discrete_obstacles_proportion: float = 0.0
     discrete_obstacle_height_range: tuple[float, float] = (0.05, 0.18)
@@ -224,7 +232,7 @@ class CourseCfg:
     # Carrot goal-planning
     lookahead: float = 2.5          # m ahead along the path (trained goal range)
     window: int = 24                # forward search window (x dense_step m)
-    spawn_jitter: float = 0.3       # m of xy noise at the spawn pad
+    spawn_jitter: float = 0.0       # 0 = spawn exactly on the end pad (fixed)
 
 
 # ════════════════════════════════════════════════════════════════════════════

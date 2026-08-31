@@ -163,11 +163,22 @@ if HAS_ISAAC:
             # variant (terrain column) alone identifies the path.
             self._course = None
             if getattr(x, "course", None) is not None and x.course.enabled:
-                from .course import CourseRuntime, build_layout
+                from .course import (
+                    CourseRuntime, build_layout, effective_cell_size,
+                )
                 c = x.course
+                # Isaac shrinks cfg.size by the (always >= 1 px) border before
+                # calling the painter, so the painted course is laid out for a
+                # slightly smaller cell than c.cell_size. Build the runtime
+                # centrelines from that same shrunk size — using c.cell_size
+                # here puts the spawn point ~5 cm past the painted end pad and
+                # skews every route the carrot follows.
+                cell = effective_cell_size(
+                    c.cell_size, x.terrain.horizontal_scale
+                )
                 layouts = [
                     build_layout(
-                        v, cell_size=c.cell_size, seg_len=c.seg_len,
+                        v, cell_size=cell, seg_len=c.seg_len,
                         end_pad=c.end_pad, bend_pad=c.bend_pad,
                         shapes=tuple(c.shapes), dense_step=c.dense_step,
                         base_seed=c.layout_seed,
@@ -316,7 +327,20 @@ if HAS_ISAAC:
             root_state = robot.data.default_root_state[env_ids].clone()
             root_state[:, 0] = env_origins[:, 0] + local_xy[:, 0]
             root_state[:, 1] = env_origins[:, 1] + local_xy[:, 1]
-            root_state[:, 2] = env_origins[:, 2] + x.robot.init_height
+            if self._course is not None:
+                # Course mode spawns on an END PAD, which the segment planner
+                # pins to exactly z=0 (stairs are emitted as equal-length
+                # up/down pairs, so the profile always returns to level), and a
+                # painted 0 is world 0 — the terrain generator's transforms
+                # only ever move x/y and the mesh is imported without a
+                # translation. env_origins[:, 2] must NOT be used here: Isaac
+                # sets it to max() over a 2 m box at the CELL CENTRE, which on
+                # a course is a wall top or a staircase, so it would drop the
+                # robot up to 3.2 m onto the pad (or bury it 0.3 m under one)
+                # at every single reset.
+                root_state[:, 2] = x.robot.init_height
+            else:
+                root_state[:, 2] = env_origins[:, 2] + x.robot.init_height
             root_state[:, 3] = torch.cos(yaw / 2)
             root_state[:, 4] = 0.0
             root_state[:, 5] = 0.0

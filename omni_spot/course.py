@@ -37,6 +37,31 @@ import numpy as np
 SEG_KINDS = ("flat", "rough", "stairs_up", "stairs_down")
 
 
+def effective_cell_size(cell_size: float, horizontal_scale: float,
+                        border_width: float = 0.0) -> float:
+    """The cell size Isaac Lab actually hands the painter — NOT `cell_size`.
+
+    `height_field_to_mesh` allocates `int(size/hs) + 1` pixels per axis,
+    reserves `int(border_width/hs) + 1` of them as border on EACH side (note
+    the +1: there is always a one-pixel border, even at border_width=0), and
+    then calls the painter with `cfg.size` shrunk to the remaining span. With
+    an 18 m cell at 0.1 m/px that is 17.9 m, not 18 m.
+
+    Both the painter and the env must build their layout from this value or
+    they disagree about where the course is: the terrain gets painted for one
+    centreline while the carrot follows another, and the robot spawns off the
+    end pad. env_cfg passes the shrunk `cfg.size` straight through, so the env
+    side calls this to arrive at the same number.
+
+    `border_width` is the SUB-TERRAIN cfg's (HfTerrainBaseCfg, default 0.0) —
+    TerrainGeneratorCfg.border_width surrounds the whole grid and is not
+    copied onto sub-terrains.
+    """
+    width_px = int(cell_size / horizontal_scale) + 1
+    border_px = int(border_width / horizontal_scale) + 1
+    return (width_px - 2 * border_px) * horizontal_scale
+
+
 @dataclass
 class CourseLayout:
     """Deterministic geometry of one course variant (cell-local coords,
@@ -254,14 +279,14 @@ def paint_course(
     wall = float(np.max(prof_h)) + wall_height
     h_px = np.where(on_lane, h_px, wall)
 
-    # Pin the CELL-CENTER height to exactly 0: Isaac's height_field_to_mesh
-    # derives the cell origin z from the terrain around the center, and for a
-    # course the center may be a wall top (env origin 1 m in the air ->
-    # robots spawn falling). A tiny flat plaza at z=0 makes origin z
-    # deterministic. Off-lane, so it never affects the walkable course.
-    dist_c = np.sqrt(px[:, 0] ** 2 + px[:, 1] ** 2)
-    h_px = np.where((dist_c <= 0.35) & ~on_lane, 0.0, h_px)
-
+    # NOTE: nothing is carved at the cell centre. An earlier version flattened
+    # a 0.35 m disc there to try to force Isaac's env-origin z to 0, which
+    # cannot work: height_field_to_mesh takes origin_z = np.max() over a 2 m
+    # box at the centre, and lowering pixels never moves a maximum while one
+    # taller pixel remains in the window. Widening the disc to cover the whole
+    # window would instead punch a pit into any course whose lane crosses the
+    # middle. nav_env therefore ignores env_origins[:, 2] on courses and spawns
+    # from the end pads, which the segment planner pins to exactly z=0.
     return np.round(h_px.reshape(n, n) / vs).astype(np.int16)
 
 

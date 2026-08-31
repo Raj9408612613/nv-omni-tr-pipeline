@@ -58,12 +58,13 @@ def make_cfg():
     g = cfg.goal
     g.dist_range = (3.0, 7.0)      # was (1.5, 3.5)
     g.episode_len_steps = 1200     # 24 s: 7 m over stairs + get-ups fits
-    # Spawn near the patch center (legged_gym spawns at origin ±1 m). Spawn
-    # z is env_origin.z + init_height, and origin z is the terrain height at
-    # the patch CENTER — with full-patch spawns on 16 m stair rows the robot
-    # would drop (pyramid up) or spawn buried (pyramid down) by the apex
-    # height. ±1 m keeps all spawns on the 3 m center platform.
-    g.spawn_half = 1.0
+    # Fixed start at the patch CENTER. Spawn z is env_origin.z + init_height
+    # and origin z is Isaac's max over a 2 m box at that centre — on the 3 m
+    # stair platform that IS the terrain height there, so the robot is placed
+    # standing on the surface. Any spread would put spawns off the platform on
+    # 16 m stair rows, dropping (pyramid up) or burying (pyramid down) it by
+    # up to the apex height.
+    g.spawn_half = 0.0             # fixed start, standing on the platform
 
     t = cfg.terrain
     t.patch_size = 16.0            # was 8.0
