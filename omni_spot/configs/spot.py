@@ -77,11 +77,11 @@ def make_cfg() -> ExperimentCfg:
         max_depth=10.0,
         mounts=(
             CameraMountCfg(
-                name="cam_front_center",
-                pos=(0.45, 0.0, 0.05),
-                rot=(0.5, -0.5, 0.5, -0.5),  # optical axis = body +X (ros)
-                convention="ros",
-            ),
+                            name="cam_front_center",
+                            pos=(0.45, 0.0, 0.05),
+                            pitch_deg=30.0,
+                            convention="ros",
+           ),
         ),
     )
 
