@@ -255,6 +255,23 @@ class ScandotsCfg:
         return ((self.grid_x - 1) * self.spacing, (self.grid_y - 1) * self.spacing)
 
 
+def _qmul(a, b):
+    w1, x1, y1, z1 = a
+    w2, x2, y2, z2 = b
+    return (w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2)
+
+
+def _rotate(q, v):
+    w, x, y, z = q
+    vx, vy, vz = v
+    return ((1-2*(y*y+z*z))*vx + 2*(x*y-z*w)*vy + 2*(x*z+y*w)*vz,
+            2*(x*y+z*w)*vx + (1-2*(x*x+z*z))*vy + 2*(y*z-x*w)*vz,
+            2*(x*z-y*w)*vx + 2*(y*z+x*w)*vy + (1-2*(x*x+y*y))*vz)
+
+
 @dataclass
 class CameraMountCfg:
     """One depth camera rigidly attached to RobotCfg.cam_mount_body."""
@@ -265,6 +282,23 @@ class CameraMountCfg:
     # "ros" convention = optical axis along body +X (looking forward).
     rot: tuple[float, float, float, float] = (0.5, -0.5, 0.5, -0.5)
     convention: str = "ros"
+    # Nose-down tilt in degrees, composed onto `rot` about body +Y (left).
+    # 0.0 leaves `rot` untouched. Level at Spot's ride height sees no ground
+    # closer than ~1.3 m; ~30 deg pulls that to ~0.75 m at no cost to far
+    # range (frustum top edge still clears the horizon until ~32 deg).
+    pitch_deg: float = 0.0
+
+    def __post_init__(self):
+        if self.pitch_deg:
+            h = math.radians(self.pitch_deg) / 2.0
+            self.rot = _qmul((math.cos(h), 0.0, math.sin(h), 0.0), self.rot)
+        n = math.sqrt(sum(c * c for c in self.rot))
+        self.rot = tuple(c / n for c in self.rot)
+        ax, _, az = _rotate(self.rot, (0.0, 0.0, 1.0))
+        assert ax > 0.0 and az <= 1e-9, (
+            f"{self.name}: optical axis {(ax, az)} is not forward/down — "
+            f"check pitch_deg sign or rot"
+        )
 
 
 @dataclass
