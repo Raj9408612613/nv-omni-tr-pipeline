@@ -241,7 +241,7 @@ class ScandotsCfg:
     grid_x: int = 17                # points along base-forward axis
     grid_y: int = 11                # points along base-left axis
     spacing: float = 0.1            # m between points
-    forward_offset: float = 0.0     # m, bias grid center forward of base
+    forward_offset: float = 0.3     # m, bias grid center forward of base
     height_clip: float = 1.0        # obs clamp, m
     attach_yaw_only: bool = True
 
