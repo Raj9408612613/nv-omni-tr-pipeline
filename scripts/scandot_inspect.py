@@ -62,7 +62,11 @@ _p.add_argument("--num_envs", type=int, default=1)
 _p.add_argument("--steps", type=int, default=200)
 _p.add_argument("--every", type=int, default=20, help="print a pane every K steps")
 _p.add_argument("--seed", type=int, default=42)
-_p.add_argument("--ckpt", default=None, help="teacher checkpoint to drive with")
+_p.add_argument("--ckpt", default=None,
+                help="checkpoint to drive with. Teacher OR student — the phase "
+                     "is detected from the weights. A student checkpoint also "
+                     "requires --camera. Without --ckpt the robot holds its "
+                     "standing pose and never traverses terrain.")
 _p.add_argument("--camera", action="store_true",
                 help="enable the depth rig (Pane C + overlap measurement)")
 _p.add_argument("--markers", action="store_true",
@@ -99,6 +103,32 @@ from omni_spot.scandot_probe import (  # noqa: E402
 # ════════════════════════════════════════════════════════════════════════
 # Helpers
 # ════════════════════════════════════════════════════════════════════════
+
+def detect_phase(state: dict, declared: str | None = None) -> str:
+    """'teacher' | 'student' | 'unknown', from the state_dict's own keys.
+
+    The two policies differ only in which encoder occupies
+    `actor.extero_encoder` — ScandotEncoder exposes `.net.*`, DepthGRUEncoder
+    exposes `.cnn.*`/`.gru.*`. Keys are the authority here; the checkpoint's
+    `phase` string is only cross-checked, since it is metadata that can be
+    stale while the weights cannot.
+    """
+    keys = list(state)
+    student = any(k.startswith(("actor.extero_encoder.cnn.",
+                                "actor.extero_encoder.gru.")) for k in keys)
+    teacher = (any(k.startswith("actor.extero_encoder.net.") for k in keys)
+               or any(k.startswith(("priv_encoder.", "critic.")) for k in keys))
+    if student and not teacher:
+        found = "student"
+    elif teacher and not student:
+        found = "teacher"
+    else:
+        return "unknown"
+    if declared and declared != found:
+        print(f"[inspect][WARN] checkpoint says phase='{declared}' but its "
+              f"weights are a {found} policy; trusting the weights.")
+    return found
+
 
 def yaw_roll_pitch(q: np.ndarray) -> tuple[float, float, float]:
     """(yaw, roll, pitch) in radians from a (w, x, y, z) quaternion.
@@ -178,6 +208,30 @@ def main() -> int:
     if args.camera:
         x.camera.enabled = True
 
+    # ── Pre-flight: identify the checkpoint BEFORE the slow env build ──
+    ckpt_state = ckpt_phase = None
+    if args.ckpt:
+        from omni_spot.checkpoint import load_checkpoint
+        ck = load_checkpoint(args.ckpt, "cpu")
+        ckpt_state = ck["model_state_dict"]
+        ckpt_phase = detect_phase(ckpt_state, ck.get("phase"))
+        print(f"[INIT] {args.ckpt} -> {ckpt_phase} checkpoint")
+        if ckpt_phase == "unknown":
+            print("[ERROR] cannot tell whether this is a teacher or student "
+                  "checkpoint; its actor.extero_encoder.* keys match neither "
+                  "ScandotEncoder (.net.*) nor DepthGRUEncoder (.cnn/.gru.*).")
+            return 2
+        if ckpt_phase == "student" and not x.camera.enabled:
+            print(
+                "[ERROR] this is a STUDENT checkpoint: it drives from the depth\n"
+                "        camera, which is off in this run. Re-run with --camera:\n"
+                f"          python scripts/scandot_inspect.py --robot {args.robot} "
+                f"--camera --ckpt {args.ckpt}\n"
+                "        (or pass a teacher checkpoint to inspect without "
+                "rendering)."
+            )
+            return 2
+
     from omni_spot.env_cfg import build_env_cfg
     from omni_spot.nav_env import NavEnv
 
@@ -192,17 +246,38 @@ def main() -> int:
     device = env.device
 
     policy = None
-    if args.ckpt:
-        from omni_spot.checkpoint import load_checkpoint
-        from omni_spot.networks import TeacherPolicy
-        policy = TeacherPolicy(x).to(device)
-        policy.load_state_dict(load_checkpoint(args.ckpt, device)["model_state_dict"])
+    if ckpt_state is not None:
+        from omni_spot.networks import StudentPolicy, TeacherPolicy
+        cls = TeacherPolicy if ckpt_phase == "teacher" else StudentPolicy
+        policy = cls(x).to(device)
+        policy.load_state_dict(
+            {k: v.to(device) for k, v in ckpt_state.items()}
+        )
         policy.eval()
-        print(f"[INIT] driving with teacher {args.ckpt}")
+        print(f"[INIT] driving with the {ckpt_phase} policy")
     else:
-        print("[INIT] driving with zero actions (plumbing check)")
+        print("[INIT] driving with zero actions — the robot HOLDS ITS STANDING "
+              "POSE and will not traverse terrain. Pass --ckpt to walk.")
 
     obs, _ = env.reset()
+    prev_done = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
+
+    def act() -> torch.Tensor:
+        """One deterministic action from whichever policy was loaded."""
+        if policy is None:
+            return torch.zeros(args.num_envs, x.action_dim, device=device)
+        with torch.no_grad():
+            if ckpt_phase == "teacher":
+                a = policy.act_mean(
+                    obs["proprio"], obs["scandots"], obs["priv"]
+                )
+            else:
+                a = policy.act_mean(
+                    obs["proprio"], obs["depth"] / x.camera.max_depth,
+                    obs["depth_new_frame"], obs["history"],
+                    reset_mask=prev_done,
+                )
+        return a.clamp(-1.0, 1.0)
     markers, n_colors = build_markers(x.scandots.n_points) if args.markers else (None, 0)
 
     order = None
@@ -211,14 +286,9 @@ def main() -> int:
     saved: dict[str, list] = {"heights": [], "depth": []}
 
     for step in range(1, args.steps + 1):
-        if policy is not None:
-            with torch.no_grad():
-                action = policy.act_mean(
-                    obs["proprio"], obs["scandots"], obs["priv"]
-                ).clamp(-1.0, 1.0)
-        else:
-            action = torch.zeros(args.num_envs, x.action_dim, device=device)
-        obs, _r, _te, _tr, _info = env.step(action)
+        action = act()
+        obs, _r, terminated, truncated, _info = env.step(action)
+        prev_done = terminated | truncated
 
         heights = obs["scandots"][0].detach().cpu().numpy()
         robot = env.scene["robot"]
