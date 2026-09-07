@@ -78,6 +78,13 @@ _p.add_argument("--watch", default="0",
                      "first env with real terrain relief and stay on it), or "
                      "'roam' (re-pick the most varied env every step — note "
                      "that consecutive prints are then DIFFERENT robots)")
+_p.add_argument("--terrain_col", type=int, default=None,
+                help="force every env onto this curriculum COLUMN (the column "
+                     "picks the sub-terrain type). The startup banner lists "
+                     "which column is which. Implies curriculum off.")
+_p.add_argument("--terrain_row", type=int, default=None,
+                help="force every env onto this difficulty ROW (0 = easiest). "
+                     "Implies curriculum off.")
 _p.add_argument("--fixed_scale", action="store_true",
                 help="scale the heatmap to +/-height_clip instead of to the "
                      "data (use to compare absolute magnitudes across steps)")
@@ -111,6 +118,37 @@ from omni_spot.scandot_probe import (  # noqa: E402
 # ════════════════════════════════════════════════════════════════════════
 # Helpers
 # ════════════════════════════════════════════════════════════════════════
+
+def subterrain_columns(x) -> list[str]:
+    """Which sub-terrain each curriculum COLUMN holds.
+
+    Mirrors Isaac's TerrainGenerator: with curriculum=True each column is
+    assigned one sub-terrain by cumulative proportion. This matters because a
+    single env always lands in column 0 — so `--num_envs 1` does not sample a
+    random terrain type, it deterministically gets whatever column 0 is.
+    """
+    t = x.terrain
+    names = ["flat", "rough", "stairs_up", "stairs_down"]
+    props = [t.flat_proportion, t.rough_proportion,
+             t.stairs_up_proportion, t.stairs_down_proportion]
+    for nm, key in (("discrete_obstacles", "discrete_obstacles_proportion"),
+                    ("random_grid", "random_grid_proportion"),
+                    ("rails", "rails_proportion"),
+                    ("stepping_stones", "stepping_stones_proportion")):
+        v = getattr(t, key, 0.0)
+        if v > 0:
+            names.append(nm)
+            props.append(v)
+    p = np.asarray(props, dtype=float)
+    if p.sum() <= 0:
+        return ["?"] * t.cols
+    cum = np.cumsum(p / p.sum())
+    out = []
+    for c in range(t.cols):
+        hit = np.where(c / t.cols + 0.001 < cum)[0]
+        out.append(names[int(hit.min())] if hit.size else names[-1])
+    return out
+
 
 def terrain_verdict(grid: np.ndarray, spread_cm: float) -> str:
     """Describe the terrain from the scandots themselves, not from config.
@@ -263,6 +301,25 @@ def main() -> int:
     if args.camera:
         x.camera.enabled = True
 
+    cols = subterrain_columns(x)
+    print("[INIT] terrain columns (the column picks the sub-terrain TYPE, "
+          "the row picks difficulty):")
+    for c, nm in enumerate(cols):
+        print(f"         col {c} -> {nm}")
+    missing = sorted({"flat", "rough", "stairs_up", "stairs_down"} - set(cols))
+    if missing:
+        print(f"[INIT][WARN] these configured sub-terrains get NO column and "
+              f"are never generated: {missing}")
+    forced = args.terrain_col is not None or args.terrain_row is not None
+    if forced:
+        # Curriculum promotion would immediately move envs off the forced cell.
+        x.curriculum.enabled = False
+        print("[INIT] terrain forced -> curriculum disabled for this run")
+    elif args.num_envs == 1:
+        print(f"[INIT][NOTE] with --num_envs 1 Isaac puts the single env in "
+              f"COLUMN 0 ('{cols[0]}') — it is not a random draw. Use "
+              f"--terrain_col N to place it deliberately.")
+
     # ── Pre-flight: identify the checkpoint BEFORE the slow env build ──
     ckpt_state = ckpt_phase = None
     if args.ckpt:
@@ -313,6 +370,26 @@ def main() -> int:
     else:
         print("[INIT] driving with zero actions — the robot HOLDS ITS STANDING "
               "POSE and will not traverse terrain. Pass --ckpt to walk.")
+
+    if forced:
+        terr = env.scene.terrain
+        try:
+            origins = terr.terrain_origins            # (rows, cols, 3)
+            n_rows, n_cols = origins.shape[0], origins.shape[1]
+            if args.terrain_row is not None:
+                terr.terrain_levels[:] = max(0, min(args.terrain_row, n_rows - 1))
+            if args.terrain_col is not None:
+                terr.terrain_types[:] = max(0, min(args.terrain_col, n_cols - 1))
+            terr.env_origins[:] = origins[
+                terr.terrain_levels, terr.terrain_types
+            ]
+            r0 = int(terr.terrain_levels[0])
+            c0 = int(terr.terrain_types[0])
+            print(f"[INIT] forced all envs onto row {r0}, col {c0} "
+                  f"('{cols[c0] if c0 < len(cols) else '?'}')")
+        except (AttributeError, TypeError, IndexError) as e:
+            print(f"[INIT][WARN] could not force terrain placement ({e}); "
+                  f"envs keep their default cells")
 
     obs, _ = env.reset()
     prev_done = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
