@@ -338,13 +338,14 @@ _RAMP = " .:-=+*#%@"
 
 def ascii_heatmap(
     grid: np.ndarray, vmin: float = -1.0, vmax: float = 1.0,
-    mask: np.ndarray | None = None,
+    mask: np.ndarray | None = None, ramp: str | None = None,
 ) -> str:
     """Render a (grid_x, grid_y) array as text, FRONT OF ROBOT AT THE TOP.
 
     Cells outside an optional bool `mask` (same shape) are drawn as '·' —
     used to overlay depth-camera visibility onto the height field.
     """
+    r = ramp if ramp is not None else _RAMP
     lines = []
     span = max(vmax - vmin, 1e-9)
     for ix in range(grid.shape[0] - 1, -1, -1):
@@ -354,8 +355,8 @@ def ascii_heatmap(
                 row.append("·")
                 continue
             t = (float(grid[ix, iy]) - vmin) / span
-            k = int(round(min(max(t, 0.0), 1.0) * (len(_RAMP) - 1)))
-            row.append(_RAMP[k])
+            k = int(round(min(max(t, 0.0), 1.0) * (len(r) - 1)))
+            row.append(r[k])
         lines.append("".join(row))
     return "\n".join(lines)
 

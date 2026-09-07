@@ -115,6 +115,11 @@ from omni_spot.scandot_probe import (  # noqa: E402
 )
 
 
+# Lowest ramp char must be VISIBLE — a leading ' ' makes low ground
+# look like indentation rather than data.
+GRID_RAMP = "\u00b7.:-=+*#%@"
+
+
 # ════════════════════════════════════════════════════════════════════════
 # Helpers
 # ════════════════════════════════════════════════════════════════════════
@@ -559,8 +564,9 @@ def main() -> int:
                       f"height_clip, so the encoder cannot tell how much "
                       f"further it goes")
             print("        " + centreline(elev, x.scandots))
-            print(f"        full grid, {'auto' if not args.fixed_scale else 'fixed'}"
-                  f"-scaled, front of robot at TOP, robot's LEFT at left:")
+            print(f"        full grid — ALL {x.scandots.n_points} scandots, "
+                  f"{'auto' if not args.fixed_scale else 'fixed'}-scaled. "
+                  f"Row = forward axis, col = left/right.")
             if args.fixed_scale:
                 lo, hi = -x.scandots.height_clip, x.scandots.height_clip
             else:
@@ -573,10 +579,29 @@ def main() -> int:
                 if hi - lo < 0.10:
                     mid = 0.5 * (lo + hi)
                     lo, hi = mid - 0.05, mid + 0.05
-            for line in ascii_heatmap(-grid, -hi, -lo).splitlines():
-                print(f"        {line}")
-            print(f"        scale: ' '={-100 * hi:+.1f} cm (lowest)  ...  "
-                  f"'@'={-100 * lo:+.1f} cm (highest)")
+            # No blank in the ramp: ' ' as the lowest value made low ground
+            # indistinguishable from indentation, so the grid read as ragged
+            # text instead of data.
+            rows = ascii_heatmap(-grid, -hi, -lo, ramp=GRID_RAMP).splitlines()
+            sc = x.scandots
+            x_min = -sc.size[0] / 2.0 + sc.forward_offset
+            ix_base = int(round((0.0 - x_min) / sc.spacing))
+            pad = " " * max(0, (sc.grid_y - 9) // 2)
+            print(f"        {'':>7}  {pad}L<--{'-' * max(0, sc.grid_y - 9)}-->R"
+                  f"   (each char = 1 scandot; {sc.grid_x} rows x {sc.grid_y} "
+                  f"cols = {sc.n_points} points)")
+            for k, line in enumerate(rows):
+                ix = sc.grid_x - 1 - k              # rows print front -> rear
+                tag = ""
+                if k == 0:
+                    tag = "  <- FRONT"
+                elif ix == ix_base:
+                    tag = "  <- under the base"
+                elif k == len(rows) - 1:
+                    tag = "  <- REAR"
+                print(f"        {x_min + ix * sc.spacing:+5.2f}m  {line}{tag}")
+            print(f"        scale: '{GRID_RAMP[0]}'={-100 * hi:+.1f} cm (lowest)"
+                  f"  ...  '{GRID_RAMP[-1]}'={-100 * lo:+.1f} cm (highest)")
             if cov is not None:
                 vis_grid = to_heatmap(m.astype(float), x.scandots, order=order)
                 print(f"PANE C  depth camera sees {100 * cov:.1f}% of the "
