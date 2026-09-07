@@ -11,6 +11,7 @@ Adding a second robot = adding one new config module with make_cfg().
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
