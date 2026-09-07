@@ -73,6 +73,12 @@ _p.add_argument("--markers", action="store_true",
                 help="draw 3D scandot markers from the composited tensor")
 _p.add_argument("--forward_offset", type=float, default=None,
                 help="override scandots.forward_offset for this run")
+_p.add_argument("--watch", default="0",
+                help="which env to display: an index, or 'auto' to follow the "
+                     "one currently on the most varied terrain")
+_p.add_argument("--fixed_scale", action="store_true",
+                help="scale the heatmap to +/-height_clip instead of to the "
+                     "data (use to compare absolute magnitudes across steps)")
 _p.add_argument("--save_dir", default=None,
                 help="write heights/depth npz + PNGs here")
 AppLauncher.add_app_launcher_args(_p)
@@ -103,6 +109,53 @@ from omni_spot.scandot_probe import (  # noqa: E402
 # ════════════════════════════════════════════════════════════════════════
 # Helpers
 # ════════════════════════════════════════════════════════════════════════
+
+def terrain_verdict(grid: np.ndarray, spread_cm: float) -> str:
+    """Describe the terrain from the scandots themselves, not from config.
+
+    Config can say "difficulty row 3" while the robot stands on a flat patch;
+    the heights are the ground truth about what it is actually looking at.
+    """
+    if spread_cm < 2.0:
+        return f"FLAT (only {spread_cm:.1f} cm of relief across the whole grid)"
+    # A step is a SUSTAINED front-to-rear offset, not one big neighbour gap —
+    # random rough ground produces large gaps too, so requiring both keeps
+    # noise from being reported as a staircase.
+    n = grid.shape[0]
+    third = max(1, n // 3)
+    rear = float(np.median(grid[:third]))
+    front = float(np.median(grid[-third:]))
+    offset_cm = 100.0 * (front - rear)
+    jump_cm = 100.0 * float(np.abs(np.diff(grid[:, grid.shape[1] // 2])).max())
+    if abs(offset_cm) > 5.0 and jump_cm > 4.0:
+        kind = "STEP UP" if offset_cm > 0 else "STEP DOWN / DROP"
+        return (f"{kind} ahead ({abs(offset_cm):.1f} cm sustained offset "
+                f"front-vs-rear, biggest single jump {jump_cm:.1f} cm)")
+    if spread_cm < 8.0:
+        return f"ROUGH ({spread_cm:.1f} cm of relief, no sustained step)"
+    return (f"VERY UNEVEN ({spread_cm:.1f} cm of relief, "
+            f"front-vs-rear offset only {offset_cm:+.1f} cm)")
+
+
+def centreline(grid: np.ndarray, sc) -> str:
+    """One-line front-to-back profile down the robot's centre, in cm.
+
+    This is the view that actually answers "is there a step ahead?" — the
+    full grid is for spotting left/right asymmetry.
+    """
+    profile = grid[:, grid.shape[1] // 2]
+    x_min = -sc.size[0] / 2.0 + sc.forward_offset
+    ix_base = int(round((0.0 - x_min) / sc.spacing))
+    cells, marks = [], []
+    for ix in range(grid.shape[0] - 1, -1, -1):       # front -> rear
+        cells.append(f"{100 * profile[ix]:+4.0f}")
+        marks.append(" ^  " if ix == ix_base else "    ")
+    x_max = x_min + (grid.shape[0] - 1) * sc.spacing
+    return (f"centre line, front({x_max:+.2f}m) -> rear({x_min:+.2f}m), cm "
+            f"(^ marks the point under the base):\n"
+            f"        " + "".join(cells) + "\n"
+            f"        " + "".join(marks).rstrip())
+
 
 def detect_phase(state: dict, declared: str | None = None) -> str:
     """'teacher' | 'student' | 'unknown', from the state_dict's own keys.
@@ -282,6 +335,7 @@ def main() -> int:
 
     order = None
     sat_acc: list[float] = []
+    max_relief_cm = 0.0
     cov_acc: list[float] = []
     saved: dict[str, list] = {"heights": [], "depth": []}
 
@@ -290,13 +344,22 @@ def main() -> int:
         obs, _r, terminated, truncated, _info = env.step(action)
         prev_done = terminated | truncated
 
-        heights = obs["scandots"][0].detach().cpu().numpy()
+        all_heights = obs["scandots"].detach().cpu().numpy()
+        # Per-env relief, used both to pick the watched env and to report
+        # whether ANY robot is on interesting terrain this step.
+        relief = all_heights.max(axis=1) - all_heights.min(axis=1)
+        w = int(relief.argmax()) if args.watch == "auto" else min(
+            int(args.watch), args.num_envs - 1
+        )
+        max_relief_cm = max(max_relief_cm, 100.0 * float(relief.max()))
+
+        heights = all_heights[w]
         robot = env.scene["robot"]
-        root_pos = robot.data.root_pos_w[0].detach().cpu().numpy()
-        quat = robot.data.root_quat_w[0].detach().cpu().numpy()
+        root_pos = robot.data.root_pos_w[w].detach().cpu().numpy()
+        quat = robot.data.root_quat_w[w].detach().cpu().numpy()
         yaw, roll, pitch = yaw_roll_pitch(quat)
 
-        hits_w = env.scene["height_scanner"].data.ray_hits_w[0].detach().cpu().numpy()
+        hits_w = env.scene["height_scanner"].data.ray_hits_w[w].detach().cpu().numpy()
         local = hits_to_yaw_frame(hits_w, root_pos, yaw)
 
         # ── Verify the flatten order ONCE against the live sensor ───────
@@ -362,29 +425,52 @@ def main() -> int:
             saved["heights"].append(heights)
             if x.camera.enabled:
                 saved["depth"].append(
-                    obs["depth"][0, 0].detach().cpu().numpy()
+                    obs["depth"][w, 0].detach().cpu().numpy()
                 )
 
         # ── Print the panes ────────────────────────────────────────────
         if step % args.every == 0 and order is not None:
             grid = to_heatmap(heights, x.scandots, order=order)
+            spread_cm = 100.0 * (sat["max"] - sat["min"])
+            lvl = (int(env.scene.terrain.terrain_levels[w])
+                   if hasattr(env.scene.terrain, "terrain_levels") else -1)
+            col = (int(env.scene.terrain.terrain_types[w])
+                   if hasattr(env.scene.terrain, "terrain_types") else -1)
             print("\n" + "=" * 70)
-            print(f"step {step}  base_h={float(env._base_height[0]):.3f} m  "
+            print(f"step {step}  base_h={float(env._base_height[w]):.3f} m  "
                   f"pitch={math.degrees(pitch):+.1f}deg "
                   f"roll={math.degrees(roll):+.1f}deg  "
-                  f"terrain_lvl="
-                  f"{int(env.scene.terrain.terrain_levels[0]) if hasattr(env.scene.terrain, 'terrain_levels') else -1}")
-            print(f"PANE A  scandots  min={sat['min']:+.3f} max={sat['max']:+.3f} "
-                  f"mean={sat['mean']:+.3f} std={sat['std']:.3f}  "
-                  f"SATURATED={100 * sat['frac_saturated']:.1f}% "
-                  f"(+clip {100 * sat['frac_at_pos_clip']:.1f}%, "
-                  f"-clip {100 * sat['frac_at_neg_clip']:.1f}%)")
-            print("        front of robot at TOP, robot's left at LEFT; "
-                  "'.'=low/far below, '@'=high/at base")
-            for line in ascii_heatmap(
-                grid, -x.scandots.height_clip, x.scandots.height_clip
-            ).splitlines():
+                  f"terrain row={lvl} col={col}  [env {w}{' (auto)' if args.watch == 'auto' else ''}]")
+            print(f"PANE A  scandots, in cm relative to nominal ride height "
+                  f"({x.reward.target_height:.2f} m under the base).")
+            print(f"        + = surface closer to the base (step UP), "
+                  f"- = further below (step DOWN / drop)")
+            print(f"        range {100 * sat['min']:+.1f} .. "
+                  f"{100 * sat['max']:+.1f} cm   spread {spread_cm:.1f} cm   "
+                  f"-> {terrain_verdict(grid, spread_cm)}")
+            if sat["frac_saturated"] > 0:
+                print(f"        SATURATED {100 * sat['frac_saturated']:.1f}% of "
+                      f"points are pinned at the +/-{x.scandots.height_clip} m "
+                      f"height_clip (information destroyed)")
+            print("        " + centreline(grid, x.scandots))
+            print(f"        full grid, {'auto' if not args.fixed_scale else 'fixed'}"
+                  f"-scaled, front of robot at TOP, robot's LEFT at left:")
+            if args.fixed_scale:
+                lo, hi = -x.scandots.height_clip, x.scandots.height_clip
+            else:
+                # Auto-scale, floored at a 10 cm span. Without a floor, 1 cm of
+                # raycast noise on flat ground stretches across the full ramp
+                # and renders as speckle that reads like terrain. 10 cm is the
+                # scale at which relief starts to matter to a walking Spot, so
+                # anything below it correctly renders as near-uniform.
+                lo, hi = sat["min"], sat["max"]
+                if hi - lo < 0.10:
+                    mid = 0.5 * (lo + hi)
+                    lo, hi = mid - 0.05, mid + 0.05
+            for line in ascii_heatmap(grid, lo, hi).splitlines():
                 print(f"        {line}")
+            print(f"        scale: ' '={100 * lo:+.1f} cm  ...  "
+                  f"'@'={100 * hi:+.1f} cm")
             if cov is not None:
                 vis_grid = to_heatmap(m.astype(float), x.scandots, order=order)
                 print(f"PANE C  depth camera sees {100 * cov:.1f}% of the "
@@ -393,10 +479,10 @@ def main() -> int:
                       "('@'=seen by camera)")
                 for line in ascii_heatmap(vis_grid, 0.0, 1.0).splitlines():
                     print(f"        {line}")
-                d = obs["depth"][0, 0].detach().cpu().numpy()
+                d = obs["depth"][w, 0].detach().cpu().numpy()
                 print(f"        depth image {d.shape[0]}x{d.shape[1]}  "
                       f"min={d.min():.2f} max={d.max():.2f} m  "
-                      f"new_frame={bool(obs['depth_new_frame'][0])}")
+                      f"new_frame={bool(obs['depth_new_frame'][w])}")
                 for line in ascii_depth(d, x.camera.max_depth).splitlines():
                     print(f"        {line}")
 
@@ -408,6 +494,22 @@ def main() -> int:
     print(f"  forward_offset           {x.scandots.forward_offset:+.3f} m")
     print(f"  mean scandot saturation  {100 * float(np.mean(sat_acc)):.1f}%  "
           f"(height_clip=+/-{x.scandots.height_clip})")
+    print(f"  max terrain relief seen  {max_relief_cm:.1f} cm "
+          f"(across all {args.num_envs} env(s), all steps)")
+    if max_relief_cm < 3.0:
+        print(
+            "  ^ NO ROBOT LEFT FLAT GROUND during this run, so the scandots had\n"
+            "    nothing to show. Each env sits in ONE terrain column, and the\n"
+            "    column decides the sub-terrain type (flat / rough / stairs_up /\n"
+            "    stairs_down) — with --num_envs 1 you get one type, usually flat.\n"
+            "    To see stairs, run more envs and follow the interesting one:\n"
+            f"      PYTHONPATH=. python scripts/scandot_inspect.py --robot "
+            f"{args.robot} \\\n"
+            f"          --num_envs 64 --watch auto --steps 600 --every 50 "
+            f"--headless \\\n"
+            f"          --ckpt <teacher>.pt\n"
+            "    height_clip saturation cannot be judged from a flat-ground run."
+        )
     if cov_acc:
         c = np.array(cov_acc)
         print(f"  depth/scandot overlap    mean {100 * c.mean():.1f}%  "
