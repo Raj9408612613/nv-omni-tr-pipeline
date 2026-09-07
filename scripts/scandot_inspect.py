@@ -600,8 +600,20 @@ def main() -> int:
                 elif k == len(rows) - 1:
                     tag = "  <- REAR"
                 print(f"        {x_min + ix * sc.spacing:+5.2f}m  {line}{tag}")
-            print(f"        scale: '{GRID_RAMP[0]}'={-100 * hi:+.1f} cm (lowest)"
-                  f"  ...  '{GRID_RAMP[-1]}'={-100 * lo:+.1f} cm (highest)")
+            # Spell out every ramp level. The scale is per-frame (auto-scaled),
+            # so the same character means different heights in different
+            # frames — naming only the endpoints invites reading it as fixed.
+            steps = len(GRID_RAMP) - 1
+            legend = "  ".join(
+                f"{ch}={-100 * hi + i * (100 * (hi - lo)) / steps:+.0f}"
+                for i, ch in enumerate(GRID_RAMP)
+            )
+            note = "" if args.fixed_scale else (
+                "  (rescaled every frame — use --fixed_scale to compare frames)"
+            )
+            print(f"        scale (cm, low->high): {legend}")
+            print(f"        one character = "
+                  f"{100 * (hi - lo) / steps:.1f} cm{note}")
             if cov is not None:
                 vis_grid = to_heatmap(m.astype(float), x.scandots, order=order)
                 print(f"PANE C  depth camera sees {100 * cov:.1f}% of the "
