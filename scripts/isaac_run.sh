@@ -6,6 +6,12 @@
 # fresh Ubuntu + NVIDIA box (tuned for the RTX PRO 6000 Blackwell, 96 GB).
 # Re-running is safe — each stage skips work already done.
 #
+# PINNED STACK (do not mix-and-match; see Isaac Lab release notes):
+#   Isaac Lab  v2.3.2   (final release of the 2.x `main` line, Feb 2026)
+#   Isaac Sim  5.1.0    (what 2.3.x is built against)
+#   Python     3.11     (required by Isaac Sim 5.x)
+#   PyTorch    2.7.0+cu128 (x86_64; carries sm_120/Blackwell kernels)
+#
 # Stages:
 #   0. System packages + NVIDIA driver  (driver install REQUIRES a reboot:
 #                                         the script installs it, prints a
@@ -14,18 +20,20 @@
 #   1. Miniconda + conda env 'isaac' (py3.11)
 #   2. PyTorch (CUDA) + sanity check
 #   3. 32 GB swap (Isaac Sim shader compile spikes host RAM)
-#   4. Isaac Sim + Isaac Lab (pip: --no-deps core + manual deps)
+#   4. Isaac Sim 5.1.0 + Isaac Lab v2.3.2 (version-gated, not just "importable")
 #   5. Smoke tests + (optional) full teacher training
 #
 # Usage:
 #   bash scripts/isaac_run.sh            # setup + smoke; then print train cmd
 #   bash scripts/isaac_run.sh --train    # also launch the full teacher run
 #
+# NOTE: this script activates conda for ITSELF only. To run pipeline commands
+# afterwards in your own shell, first:  conda activate isaac
+#
 # ASSUMPTIONS (edit the tunables below if any are wrong):
 #   * GPU is Blackwell  -> PyTorch wheels = cu128. Change TORCH_CUDA otherwise
 #     (cu124 / cu121 / ... ) to match your driver's CUDA version.
-#   * conda env is 'isaac' (your current shell). The old notes said 'isaaclab'
-#     in one place — standardised to 'isaac' here.
+#   * conda env is 'isaac'.
 #   * The training repo is the parent directory of this script.
 # =============================================================================
 set -euo pipefail
@@ -34,11 +42,15 @@ set -euo pipefail
 ENV_NAME="isaac"
 PY_VERSION="3.11"
 TORCH_CUDA="cu128"                 # Blackwell / driver 580. Adjust if needed.
-TORCH_VERSION="2.7.0"              # MUST match Isaac Lab's pin. The cu128 build
+TORCH_VERSION="2.7.0"              # Isaac Sim 5.1 x86_64 pin. The cu128 build
                                    # of this version is what carries sm_120
                                    # (Blackwell) kernels; the default-index
                                    # cu126 build of the SAME version does not.
 TORCHVISION_VERSION="0.22.0"       # pairs with torch 2.7.0
+ISAACSIM_VERSION="5.1.0"           # Isaac Lab 2.3.x targets Isaac Sim 5.1
+ISAACLAB_TAG="v2.3.2"              # git tag; NEVER track main/develop (3.0 =
+                                   # py3.12 + Isaac Sim 6 + breaking API)
+NVIDIA_PIP_INDEX="https://pypi.nvidia.com"
 NVIDIA_DRIVER="nvidia-driver-580-open"
 SWAP_SIZE="32G"
 CONDA_DIR="$HOME/miniconda3"
@@ -53,6 +65,7 @@ RUN_TRAINING=false
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== isaac_run.sh started $(date) | repo=$REPO_DIR | env=$ENV_NAME ==="
+echo "=== target: IsaacLab $ISAACLAB_TAG | IsaacSim $ISAACSIM_VERSION | py$PY_VERSION | torch $TORCH_VERSION+$TORCH_CUDA ==="
 
 # =============================================================================
 # Stage 0 — system packages + NVIDIA driver (reboot gate)
@@ -104,6 +117,14 @@ else
 fi
 conda activate "$ENV_NAME"
 echo "    active python: $(python --version)"
+# Hard gate: Isaac Sim 5.x is py3.11-only. Catch a wrong env early, not in
+# Stage 4 with a confusing pip resolver error.
+python - <<PY
+import sys
+want = tuple(int(x) for x in "$PY_VERSION".split("."))
+have = sys.version_info[:2]
+assert have == want, f"env '$ENV_NAME' is python {have}, need {want}. Recreate: conda create -n $ENV_NAME python=$PY_VERSION"
+PY
 
 # =============================================================================
 # Stage 2 — PyTorch (CUDA) + sanity check
@@ -174,70 +195,90 @@ else
 fi
 
 # =============================================================================
-# Stage 4 — Isaac Sim + Isaac Lab
+# Stage 4 — Isaac Sim 5.1.0 + Isaac Lab v2.3.2
 # =============================================================================
-echo ">>> Stage 4: Isaac Sim + Isaac Lab"
-if python -c "import isaacsim" 2>/dev/null; then
-    echo "    isaacsim already importable"
+# LESSON from the previous run: an "already importable" probe is NOT a version
+# probe. The env had Isaac Sim 5.0 + an unpinned IsaacLab `main` clone that had
+# moved to py>=3.12, and every probe said "fine" until pip refused the editable
+# install. Every check below gates on the *pinned version*, not on importability.
+echo ">>> Stage 4: Isaac Sim $ISAACSIM_VERSION + Isaac Lab $ISAACLAB_TAG"
+
+dist_version() {   # $1 = distribution name -> version string, or "none"
+    python -c "import importlib.metadata as m; print(m.version('$1'))" 2>/dev/null || echo none
+}
+
+# ── Isaac Sim (pip, NVIDIA index). `isaacsim[all,extscache]` is the metapackage
+#    Isaac Lab's docs install; it supersedes the old split isaacsim-rl/
+#    isaacsim-replicator/... list. Reinstall when missing OR wrong version.
+have_sim="$(dist_version isaacsim)"
+if [ "$have_sim" = "$ISAACSIM_VERSION" ]; then
+    echo "    isaacsim $ISAACSIM_VERSION already installed"
 else
-    pip install isaacsim-rl isaacsim-replicator \
-        isaacsim-extscache-physics isaacsim-extscache-kit-sdk
+    echo "    isaacsim=$have_sim -> installing $ISAACSIM_VERSION ..."
+    pip install "isaacsim[all,extscache]==${ISAACSIM_VERSION}" \
+        --extra-index-url "$NVIDIA_PIP_INDEX"
 fi
 pip install "ray[default]==2.45.0"
 pip install "setuptools<75.0.0"        # re-pin: some installs bump it back up
 
-if [ ! -d "$ISAACLAB_DIR" ]; then
-    git clone https://github.com/isaac-sim/IsaacLab.git "$ISAACLAB_DIR"
+# ── Isaac Lab source, pinned to a tag. A pre-existing clone on the wrong ref
+#    is moved to the tag (fetch --tags handles shallow/old clones).
+if [ ! -d "$ISAACLAB_DIR/.git" ]; then
+    git clone --branch "$ISAACLAB_TAG" --depth 1 \
+        https://github.com/isaac-sim/IsaacLab.git "$ISAACLAB_DIR"
 else
     echo "    IsaacLab already cloned at $ISAACLAB_DIR"
 fi
+git -C "$ISAACLAB_DIR" fetch --tags --depth 1 origin "refs/tags/${ISAACLAB_TAG}:refs/tags/${ISAACLAB_TAG}" 2>/dev/null || \
+    git -C "$ISAACLAB_DIR" fetch --tags
+git -C "$ISAACLAB_DIR" checkout --quiet "$ISAACLAB_TAG"
+have_ref="$(git -C "$ISAACLAB_DIR" describe --tags --exact-match 2>/dev/null || echo unknown)"
+[ "$have_ref" = "$ISAACLAB_TAG" ] \
+    || { echo "    IsaacLab checkout is '$have_ref', expected $ISAACLAB_TAG — aborting"; exit 1; }
+echo "    IsaacLab at $have_ref"
+LAB_VER="${ISAACLAB_TAG#v}"            # v2.3.2 -> 2.3.2 (matches pip metadata)
 
-# Each Isaac Lab piece is checked and installed INDEPENDENTLY. The old version
-# wrapped core+deps+assets+tasks in ONE `import isaaclab` guard: with set -e,
-# a pip failure halfway through the block aborted the script AFTER the core -e
-# install had already linked, so every later run saw "isaaclab already
-# importable" and skipped the missing deps/assets/tasks forever. A bare
-# `import isaaclab` also succeeds without its deps, so it proves nothing —
-# the probe below imports what train.py actually needs (isaaclab.app).
-if python -c "from isaaclab.app import AppLauncher" 2>/dev/null; then
-    echo "    isaaclab core already importable (AppLauncher OK)"
-else
-    pip install --no-deps -e "$ISAACLAB_DIR/source/isaaclab"
-fi
-# Deps are cheap no-ops when already satisfied — run them UNconditionally so a
-# partially-installed env self-heals instead of being skipped past.
+# ── Isaac Lab extensions. Each piece is checked and installed INDEPENDENTLY,
+#    and gated on the tag's version (editable installs keep stale metadata
+#    across a checkout, so an importable-but-old package must be re-linked).
+#    Core is --no-deps so it cannot drag in a default-index torch; the runtime
+#    deps Isaac Lab needs are listed explicitly and re-run unconditionally
+#    (cheap no-ops when satisfied) so a half-installed env self-heals.
+ensure_ext() {     # $1 = dist name, $2 = source subdir, $3.. = extra pip flags
+    local name="$1" dir="$2"; shift 2
+    if [ "$(dist_version "$name")" = "$LAB_VER" ] && python -c "import $name" 2>/dev/null; then
+        echo "    $name $LAB_VER already installed"
+    else
+        echo "    installing $name ($LAB_VER) ..."
+        pip install "$@" -e "$ISAACLAB_DIR/source/$dir"
+    fi
+}
+ensure_ext isaaclab        isaaclab        --no-deps
 pip install toml gymnasium==1.2.1 trimesh einops warp-lang \
     prettytable==3.3.0 flatdict
-if python -c "import isaaclab_assets" 2>/dev/null; then
-    echo "    isaaclab_assets already importable"
-else
-    pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_assets"
-fi
-if python -c "import isaaclab_tasks" 2>/dev/null; then
-    echo "    isaaclab_tasks already importable"
-else
-    pip install --use-deprecated=legacy-resolver -e "$ISAACLAB_DIR/source/isaaclab_tasks"
-fi
+ensure_ext isaaclab_assets isaaclab_assets --use-deprecated=legacy-resolver
+ensure_ext isaaclab_tasks  isaaclab_tasks  --use-deprecated=legacy-resolver
 pip install tensorboard "imageio[ffmpeg]" h5py
 
 # Isaac Sim / Isaac Lab declare their own torch dependency and, when they (re)
 # install, can silently swap our cu128 wheel for a default-index cu126 build
 # that has NO sm_120 kernels — the exact "no kernel image" trap. Re-assert the
-# correct build now, AFTER those installs, so torch has the last word. This is
-# why earlier runs seemed to "reinstall every time": Stage 2 fixed torch, then
-# Stage 4 clobbered it. Idempotent once stable.
+# correct build now, AFTER those installs, so torch has the last word.
 echo ">>> Re-verifying torch CUDA arch after Isaac install"
 ensure_torch
 
-# Hard verify — ABORT here if the install is broken. The old `|| echo FAILED`
-# swallowed the error, so the script rolled into Stage 5 and exited 0 with a
-# broken env; the failure was buried mid-log. The AppLauncher import is the
-# exact path train_pbt.py takes, so passing here means training can launch.
-echo "    import check:"
-python -c "import isaacsim; print('      isaacsim OK')" \
-    || { echo "      isaacsim FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
-python -c "from isaaclab.app import AppLauncher; print('      isaaclab OK (AppLauncher importable)')" \
-    || { echo "      isaaclab FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
+# Hard verify — ABORT here if the install is broken. Checks versions, not just
+# importability, so drift is caught on every run.
+echo "    verify:"
+python - <<PY || { echo "      VERIFY FAILED — aborting (see log: $LOG_FILE)"; exit 1; }
+import importlib.metadata as m, torch
+from isaaclab.app import AppLauncher   # exact import path train.py takes
+sim, lab = m.version("isaacsim"), m.version("isaaclab")
+assert sim == "$ISAACSIM_VERSION", f"isaacsim {sim} != $ISAACSIM_VERSION"
+assert lab == "$LAB_VER",          f"isaaclab {lab} != $LAB_VER"
+assert torch.__version__.startswith("$TORCH_VERSION"), f"torch {torch.__version__}"
+print(f"      isaacsim {sim} | isaaclab {lab} | torch {torch.__version__} | cuda={torch.cuda.is_available()}")
+PY
 
 # =============================================================================
 # Stage 5 — smoke tests + (optional) full teacher training
