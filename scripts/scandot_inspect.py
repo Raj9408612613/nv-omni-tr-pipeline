@@ -74,8 +74,10 @@ _p.add_argument("--markers", action="store_true",
 _p.add_argument("--forward_offset", type=float, default=None,
                 help="override scandots.forward_offset for this run")
 _p.add_argument("--watch", default="0",
-                help="which env to display: an index, or 'auto' to follow the "
-                     "one currently on the most varied terrain")
+                help="which env to display: an index, 'auto' (latch onto the "
+                     "first env with real terrain relief and stay on it), or "
+                     "'roam' (re-pick the most varied env every step — note "
+                     "that consecutive prints are then DIFFERENT robots)")
 _p.add_argument("--fixed_scale", action="store_true",
                 help="scale the heatmap to +/-height_clip instead of to the "
                      "data (use to compare absolute magnitudes across steps)")
@@ -138,7 +140,7 @@ def terrain_verdict(grid: np.ndarray, spread_cm: float) -> str:
 
 
 def centreline(grid: np.ndarray, sc) -> str:
-    """One-line front-to-back profile down the robot's centre, in cm.
+    """One-line front-to-back ELEVATION profile down the centre, in cm.
 
     This is the view that actually answers "is there a step ahead?" — the
     full grid is for spotting left/right asymmetry.
@@ -336,6 +338,7 @@ def main() -> int:
     order = None
     sat_acc: list[float] = []
     max_relief_cm = 0.0
+    watched: int | None = None
     cov_acc: list[float] = []
     saved: dict[str, list] = {"heights": [], "depth": []}
 
@@ -348,9 +351,20 @@ def main() -> int:
         # Per-env relief, used both to pick the watched env and to report
         # whether ANY robot is on interesting terrain this step.
         relief = all_heights.max(axis=1) - all_heights.min(axis=1)
-        w = int(relief.argmax()) if args.watch == "auto" else min(
-            int(args.watch), args.num_envs - 1
-        )
+        if args.watch == "roam":
+            w = int(relief.argmax())          # re-pick every step
+        elif args.watch == "auto":
+            # Latch onto the first env with real relief and STAY on it. Without
+            # the latch, consecutive prints show different robots and the
+            # pitch/roll/base_h series cannot be read as one trajectory.
+            if watched is None and float(relief.max()) > 0.05:
+                watched = int(relief.argmax())
+                print(f"[watch] locking onto env {watched} "
+                      f"({100 * float(relief.max()):.0f} cm of relief). "
+                      f"Use --watch roam to follow the most varied env instead.")
+            w = watched if watched is not None else int(relief.argmax())
+        else:
+            w = min(int(args.watch), args.num_envs - 1)
         max_relief_cm = max(max_relief_cm, 100.0 * float(relief.max()))
 
         heights = all_heights[w]
@@ -440,19 +454,34 @@ def main() -> int:
             print(f"step {step}  base_h={float(env._base_height[w]):.3f} m  "
                   f"pitch={math.degrees(pitch):+.1f}deg "
                   f"roll={math.degrees(roll):+.1f}deg  "
-                  f"terrain row={lvl} col={col}  [env {w}{' (auto)' if args.watch == 'auto' else ''}]")
-            print(f"PANE A  scandots, in cm relative to nominal ride height "
+                  f"terrain row={lvl} col={col}  [env {w}"
+                  f"{' (roaming)' if args.watch == 'roam' else ''}]")
+            # Display GROUND ELEVATION (= -heights). The raw tensor stores the
+            # base-relative depth, where positive means the surface is FURTHER
+            # BELOW (see obs.compose_scandots: "negative = surface higher").
+            # Showing it unflipped makes a staircase read upside down.
+            elev = -grid
+            print(f"PANE A  ground elevation in cm, relative to nominal ground "
                   f"({x.reward.target_height:.2f} m under the base).")
-            print(f"        + = surface closer to the base (step UP), "
-                  f"- = further below (step DOWN / drop)")
-            print(f"        range {100 * sat['min']:+.1f} .. "
-                  f"{100 * sat['max']:+.1f} cm   spread {spread_cm:.1f} cm   "
-                  f"-> {terrain_verdict(grid, spread_cm)}")
+            print(f"        + = ground HIGHER than nominal (step up / obstacle), "
+                  f"- = LOWER (drop / step down).")
+            print(f"        (the raw scandot tensor is the negative of this; "
+                  f"shown flipped so up reads as up)")
+            print(f"        range {-100 * sat['max']:+.1f} .. "
+                  f"{-100 * sat['min']:+.1f} cm   spread {spread_cm:.1f} cm   "
+                  f"-> {terrain_verdict(elev, spread_cm)}")
             if sat["frac_saturated"] > 0:
-                print(f"        SATURATED {100 * sat['frac_saturated']:.1f}% of "
-                      f"points are pinned at the +/-{x.scandots.height_clip} m "
-                      f"height_clip (information destroyed)")
-            print("        " + centreline(grid, x.scandots))
+                bits = []
+                if sat["frac_at_pos_clip"] > 0:
+                    bits.append(f"{100 * sat['frac_at_pos_clip']:.1f}% at a DROP "
+                                f"deeper than {x.scandots.height_clip} m")
+                if sat["frac_at_neg_clip"] > 0:
+                    bits.append(f"{100 * sat['frac_at_neg_clip']:.1f}% at ground "
+                                f"higher than {x.scandots.height_clip} m")
+                print(f"        SATURATED: {', '.join(bits)} — pinned at "
+                      f"height_clip, so the encoder cannot tell how much "
+                      f"further it goes")
+            print("        " + centreline(elev, x.scandots))
             print(f"        full grid, {'auto' if not args.fixed_scale else 'fixed'}"
                   f"-scaled, front of robot at TOP, robot's LEFT at left:")
             if args.fixed_scale:
@@ -467,10 +496,10 @@ def main() -> int:
                 if hi - lo < 0.10:
                     mid = 0.5 * (lo + hi)
                     lo, hi = mid - 0.05, mid + 0.05
-            for line in ascii_heatmap(grid, lo, hi).splitlines():
+            for line in ascii_heatmap(-grid, -hi, -lo).splitlines():
                 print(f"        {line}")
-            print(f"        scale: ' '={100 * lo:+.1f} cm  ...  "
-                  f"'@'={100 * hi:+.1f} cm")
+            print(f"        scale: ' '={-100 * hi:+.1f} cm (lowest)  ...  "
+                  f"'@'={-100 * lo:+.1f} cm (highest)")
             if cov is not None:
                 vis_grid = to_heatmap(m.astype(float), x.scandots, order=order)
                 print(f"PANE C  depth camera sees {100 * cov:.1f}% of the "
